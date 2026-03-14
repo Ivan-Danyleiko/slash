@@ -1,13 +1,33 @@
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.enums import SignalType
-from app.models.models import JobRun, Market, MarketSnapshot, Signal, SignalHistory, SignalQualityMetrics, User
+from app.models.models import (
+    JobRun,
+    Market,
+    MarketSnapshot,
+    Signal,
+    SignalHistory,
+    SignalQualityMetrics,
+    Stage7AgentDecision,
+    Stage8Decision,
+    Stage8Position,
+    User,
+)
 from app.services.collectors.sync_service import CollectorSyncService
+from app.services.research.stage8_shadow_ledger import (
+    build_stage8_shadow_ledger_report,
+    extract_stage8_shadow_ledger_metrics,
+)
+from app.services.research.stage8_final_report import (
+    build_stage8_final_report,
+    extract_stage8_final_report_metrics,
+)
+from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.telegram_product import TelegramProductService
@@ -136,25 +156,51 @@ def signal_push_job(db: Session) -> dict:
         users = list(db.scalars(select(User)))
         sent = 0
         prepared = 0
+        skipped_by_reason: dict[str, int] = {}
+        now = datetime.now(UTC)
+
+        def _skip(reason: str) -> None:
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+
         for user in users:
             top = svc.top_ranked_signals(user=user, limit=5)
             top = [s for s in top if rank_score(s) > 0.1][:5]
-            prepared += len(top)
             for signal in top:
                 if not svc.can_send_signal(user, 1):
                     break
+                market = db.get(Market, signal.market_id)
+                if not market:
+                    _skip("market_missing")
+                    continue
+                if _market_is_resolved(market, now=now):
+                    _skip("market_resolved_or_closed")
+                    continue
                 ex = signal.execution_analysis or {}
                 utility = float(ex.get("utility_score") or 0.0)
                 expected_edge = float(ex.get("expected_edge") or 0.0)
                 slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
+                if slippage_edge == 0.0 and expected_edge != 0.0:
+                    slippage_edge = expected_edge
+                min_edge_after_costs = 0.005
+                min_utility = max(float(settings.signal_top_min_utility_score), 0.01)
+                if slippage_edge <= min_edge_after_costs:
+                    _skip("edge_after_costs_too_low")
+                    continue
+                if utility <= min_utility:
+                    _skip("utility_too_low")
+                    continue
                 cost_impact = max(0.0, expected_edge - slippage_edge)
                 assumptions = str(ex.get("assumptions_version") or "n/a")
                 if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
                     metric_label = "Recent move"
                     metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                    if metric_value <= 0.0:
+                        _skip("recent_move_zero")
+                        continue
                 else:
                     metric_label = "Divergence"
                     metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                prepared += 1
                 text = (
                     f"🔥 *{signal.signal_type.value}*\\n"
                     f"{signal.title}\\n"
@@ -178,8 +224,9 @@ def signal_push_job(db: Session) -> dict:
                 if resp.status_code == 200:
                     svc.record_signal_sent(user, signal)
                     sent += 1
-        _finish_job(db, job, "SUCCESS", {"signals_prepared": prepared, "signals_sent": sent})
-        return {"status": "ok", "result": {"signals_prepared": prepared, "signals_sent": sent}}
+        result = {"signals_prepared": prepared, "signals_sent": sent, "skipped_by_reason": skipped_by_reason}
+        _finish_job(db, job, "SUCCESS", result)
+        return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
         _finish_job(db, job, "FAILED", {"error": str(exc)})
         return {"status": "error", "error": str(exc)}
@@ -189,7 +236,25 @@ def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
     job = _start_job(db, "cleanup_old_signals")
     try:
         cutoff = datetime.utcnow().replace(microsecond=0) - timedelta(days=keep_days)  # type: ignore[name-defined]
-        stmt = delete(Signal).where(Signal.created_at < cutoff)
+        has_stage7_ref = exists(
+            select(Stage7AgentDecision.id).where(Stage7AgentDecision.signal_id == Signal.id)
+        )
+        has_stage8_ref = exists(
+            select(Stage8Decision.id).where(Stage8Decision.signal_id == Signal.id)
+        )
+        has_stage8_position_ref = exists(
+            select(Stage8Position.id).where(Stage8Position.signal_id == Signal.id)
+        )
+        has_signal_history_ref = exists(
+            select(SignalHistory.id).where(SignalHistory.signal_id == Signal.id)
+        )
+        stmt = delete(Signal).where(
+            Signal.created_at < cutoff,
+            ~has_stage7_ref,
+            ~has_stage8_ref,
+            ~has_stage8_position_ref,
+            ~has_signal_history_ref,
+        )
         deleted = db.execute(stmt).rowcount or 0
         db.commit()
         _finish_job(db, job, "SUCCESS", {"deleted": deleted})
@@ -300,6 +365,59 @@ def provider_contract_checks_job(db: Session) -> dict:
     status = "SUCCESS" if not failed else "FAILED"
     _finish_job(db, job, status, summary)
     return {"status": ("ok" if not failed else "error"), "result": summary}
+
+
+def stage8_shadow_ledger_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
+    job = _start_job(db, "stage8_shadow_ledger")
+    try:
+        settings = get_settings()
+        report = build_stage8_shadow_ledger_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+        tracking = record_stage5_experiment(
+            run_name="stage8_shadow_ledger",
+            params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_shadow_ledger"},
+            metrics=extract_stage8_shadow_ledger_metrics(report),
+            tags={"policy_profile": settings.stage8_policy_profile},
+        )
+        _finish_job(db, job, "SUCCESS", {"tracking": tracking, "rows": report.get("rows_total")})
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
+def stage8_final_report_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
+    job = _start_job(db, "stage8_final_report")
+    try:
+        settings = get_settings()
+        shadow = build_stage8_shadow_ledger_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+        report = build_stage8_final_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+            shadow_report=shadow,
+        )
+        tracking = record_stage5_experiment(
+            run_name="stage8_final_report",
+            params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_final_report"},
+            metrics=extract_stage8_final_report_metrics(report),
+            tags={"final_decision": str(report.get("final_decision") or "")},
+        )
+        _finish_job(db, job, "SUCCESS", {"tracking": tracking, "final_decision": report.get("final_decision")})
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
 
 
 def quality_snapshot_job(db: Session) -> dict:

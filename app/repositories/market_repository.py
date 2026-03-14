@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -45,6 +47,7 @@ class MarketRepository:
         market.resolution_time = dto.resolution_time
         market.rules_text = dto.rules_text
         market.source_payload = dto.source_payload
+        market.fetched_at = datetime.now(UTC)
 
         self.db.flush()
         self.db.add(

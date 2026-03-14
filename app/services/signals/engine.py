@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 import re
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, exists, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,9 @@ from app.models.models import (
     Signal,
     SignalGenerationStats,
     SignalHistory,
+    Stage7AgentDecision,
+    Stage8Decision,
+    Stage8Position,
 )
 from app.services.analyzers.divergence import DivergenceDetector
 from app.services.analyzers.duplicate import DuplicateDetector
@@ -171,6 +174,18 @@ class SignalEngine:
         return {"pairs_processed": len(pairs), "divergence_flagged": flagged}
 
     def generate_signals(self) -> dict[str, int]:
+        has_stage7_ref = exists(
+            select(Stage7AgentDecision.id).where(Stage7AgentDecision.signal_id == Signal.id)
+        )
+        has_stage8_ref = exists(
+            select(Stage8Decision.id).where(Stage8Decision.signal_id == Signal.id)
+        )
+        has_stage8_position_ref = exists(
+            select(Stage8Position.id).where(Stage8Position.signal_id == Signal.id)
+        )
+        has_signal_history_ref = exists(
+            select(SignalHistory.id).where(SignalHistory.signal_id == Signal.id)
+        )
         created = 0
         stale_removed = self.db.execute(
             delete(Signal).where(
@@ -180,7 +195,11 @@ class SignalEngine:
                         SignalType.DIVERGENCE,
                         SignalType.ARBITRAGE_CANDIDATE,
                     ]
-                )
+                ),
+                ~has_stage7_ref,
+                ~has_stage8_ref,
+                ~has_stage8_position_ref,
+                ~has_signal_history_ref,
             )
         ).rowcount or 0
         duplicate_attempted = 0
