@@ -455,6 +455,7 @@ class SignalEngine:
                 confidence_score=confidence,
                 liquidity_score=liquidity_by_market.get(market.id),
                 rules_risk_score=rr,
+                divergence_score=move,
                 signal_mode=mode,
                 score_breakdown_json=score_breakdown,
                 execution_analysis=self.execution.simulate(

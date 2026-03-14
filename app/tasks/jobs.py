@@ -149,11 +149,17 @@ def signal_push_job(db: Session) -> dict:
                 slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
                 cost_impact = max(0.0, expected_edge - slippage_edge)
                 assumptions = str(ex.get("assumptions_version") or "n/a")
+                if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
+                    metric_label = "Recent move"
+                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                else:
+                    metric_label = "Divergence"
+                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
                 text = (
                     f"🔥 *{signal.signal_type.value}*\\n"
                     f"{signal.title}\\n"
                     f"Confidence: {signal.confidence_score or 0:.2f}\\n"
-                    f"Divergence: {(signal.divergence_score or 0)*100:.1f}%\\n"
+                    f"{metric_label}: {metric_value:.1f}%\\n"
                     f"Utility (exec): {utility:.3f}\\n"
                     f"Edge after costs: {slippage_edge:.3f} (cost impact: {cost_impact:.3f})\\n"
                     f"Execution assumptions: `{assumptions}`\\n"
