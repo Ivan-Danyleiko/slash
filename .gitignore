@@ -1,0 +1,13 @@
+.env
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+artifacts/
+mlflow.db
+dev_smoke.db
+celerybeat-schedule
+
+prediction_market_scanner.egg-info/
+

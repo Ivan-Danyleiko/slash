@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+celerybeat-schedule
+dev_smoke.db
+*.log
+.env.backup_*
+/tmp
