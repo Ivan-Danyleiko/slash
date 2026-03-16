@@ -66,6 +66,11 @@ class Settings(BaseSettings):
         default=0.15, alias="SIGNAL_DUPLICATE_MIN_PAIR_LIQUIDITY"
     )
     signal_divergence_threshold: float = Field(default=0.15, alias="SIGNAL_DIVERGENCE_THRESHOLD")
+    signal_divergence_use_executable: bool = Field(default=False, alias="SIGNAL_DIVERGENCE_USE_EXECUTABLE")
+    signal_divergence_net_edge_min: float = Field(default=0.02, alias="SIGNAL_DIVERGENCE_NET_EDGE_MIN")
+    signal_divergence_position_size_usd: float = Field(default=50.0, alias="SIGNAL_DIVERGENCE_POSITION_SIZE_USD")
+    signal_divergence_gas_fee_usd: float = Field(default=2.0, alias="SIGNAL_DIVERGENCE_GAS_FEE_USD")
+    signal_divergence_bridge_fee_usd: float = Field(default=0.5, alias="SIGNAL_DIVERGENCE_BRIDGE_FEE_USD")
     signal_divergence_min_pair_liquidity: float = Field(
         default=0.1, alias="SIGNAL_DIVERGENCE_MIN_PAIR_LIQUIDITY"
     )
@@ -208,7 +213,7 @@ class Settings(BaseSettings):
         default=0.60,
         alias="STAGE8_CATEGORY_CONFIDENCE_FLOOR",
     )
-    stage10_replay_embargo_seconds: int = Field(default=3600, alias="STAGE10_REPLAY_EMBARGO_SECONDS")
+    stage10_replay_embargo_seconds: int = Field(default=0, alias="STAGE10_REPLAY_EMBARGO_SECONDS")
     stage10_llm_budget_usd_monthly: float = Field(default=100.0, alias="STAGE10_LLM_BUDGET_USD_MONTHLY")
     stage10_backfill_metaculus_delay_seconds: float = Field(
         default=2.0,
@@ -218,6 +223,32 @@ class Settings(BaseSettings):
         default=0.3,
         alias="STAGE10_BACKFILL_MANIFOLD_DELAY_SECONDS",
     )
+    stage11_soft_daily_drawdown_pct: float = Field(default=-1.5, alias="STAGE11_SOFT_DAILY_DRAWDOWN_PCT")
+    stage11_soft_consecutive_losses: int = Field(default=4, alias="STAGE11_SOFT_CONSECUTIVE_LOSSES")
+    stage11_hard_daily_drawdown_pct: float = Field(default=-3.0, alias="STAGE11_HARD_DAILY_DRAWDOWN_PCT")
+    stage11_hard_weekly_drawdown_pct: float = Field(default=-5.0, alias="STAGE11_HARD_WEEKLY_DRAWDOWN_PCT")
+    stage11_hard_consecutive_losses: int = Field(default=7, alias="STAGE11_HARD_CONSECUTIVE_LOSSES")
+    stage11_panic_daily_drawdown_pct: float = Field(default=-6.0, alias="STAGE11_PANIC_DAILY_DRAWDOWN_PCT")
+    stage11_panic_execution_error_rate_1h: float = Field(default=0.10, alias="STAGE11_PANIC_EXECUTION_ERROR_RATE_1H")
+    stage11_panic_reconciliation_gap_usd: float = Field(default=50.0, alias="STAGE11_PANIC_RECONCILIATION_GAP_USD")
+    stage11_max_unknown_recovery_sec: int = Field(default=120, alias="STAGE11_MAX_UNKNOWN_RECOVERY_SEC")
+    stage11_min_shadow_days: int = Field(default=14, alias="STAGE11_MIN_SHADOW_DAYS")
+    stage11_limited_min_days: int = Field(default=30, alias="STAGE11_LIMITED_MIN_DAYS")
+    stage11_limited_min_trades: int = Field(default=100, alias="STAGE11_LIMITED_MIN_TRADES")
+    stage11_realized_return_tolerance_pct: float = Field(
+        default=0.02,
+        alias="STAGE11_REALIZED_RETURN_TOLERANCE_PCT",
+    )
+    stage11_allowed_custody_modes: str = Field(
+        default="CLIENT_SIGNED,MANAGED_HOT_WALLET",
+        alias="STAGE11_ALLOWED_CUSTODY_MODES",
+    )
+    stage11_venue: str = Field(default="POLYMARKET_CLOB", alias="STAGE11_VENUE")
+    stage11_venue_dry_run: bool = Field(default=True, alias="STAGE11_VENUE_DRY_RUN")
+    stage11_clob_use_sdk: bool = Field(default=False, alias="STAGE11_CLOB_USE_SDK")
+    stage11_clob_private_key: str = Field(default="", alias="STAGE11_CLOB_PRIVATE_KEY")
+    stage11_clob_funder_address: str = Field(default="", alias="STAGE11_CLOB_FUNDER_ADDRESS")
+    stage11_clob_chain_id: int = Field(default=137, alias="STAGE11_CLOB_CHAIN_ID")
     stage7_openai_api_base_url: str = Field(
         default="https://api.openai.com/v1",
         alias="STAGE7_OPENAI_API_BASE_URL",
@@ -238,6 +269,7 @@ class Settings(BaseSettings):
     stage7_openrouter_x_title: str = Field(default="prediction-market-scanner", alias="STAGE7_OPENROUTER_X_TITLE")
     signal_history_retention_days: int = Field(default=90, alias="SIGNAL_HISTORY_RETENTION_DAYS")
     signal_labeling_tolerance_minutes: int = Field(default=10, alias="SIGNAL_LABELING_TOLERANCE_MINUTES")
+    signal_labeling_horizon_lag_hours: float = Field(default=2.0, alias="SIGNAL_LABELING_HORIZON_LAG_HOURS")
     signal_duplicate_resolution_window_days: int = Field(
         default=365, alias="SIGNAL_DUPLICATE_RESOLUTION_WINDOW_DAYS"
     )

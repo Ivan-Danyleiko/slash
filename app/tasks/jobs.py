@@ -30,6 +30,9 @@ from app.services.research.stage8_final_report import (
 from app.services.research.stage9_batch import build_stage9_batch_report
 from app.services.research.stage10_batch import build_stage10_batch_report
 from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
+from app.services.research.signal_history_labeler import label_signal_history_from_snapshots
+from app.services.stage11.reports import build_stage11_track_report
+from app.services.stage11.order_manager import reconcile_orders
 from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
@@ -547,6 +550,72 @@ def stage10_timeline_backfill_job(
         return {"status": "error", "error": str(exc)}
 
 
+def stage11_track_job(
+    db: Session,
+    *,
+    days_execution: int = 14,
+    days_client: int = 7,
+) -> dict:
+    job = _start_job(db, "stage11_track")
+    try:
+        settings = get_settings()
+        report = build_stage11_track_report(
+            db,
+            settings=settings,
+            days_execution=days_execution,
+            days_client=days_client,
+        )
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "final_decision": str(report.get("final_decision") or ""),
+                "orders_total": int((report.get("summary") or {}).get("orders_total") or 0),
+                "global_circuit_breaker_level": str((report.get("summary") or {}).get("global_circuit_breaker_level") or "OK"),
+            },
+        )
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
+def stage11_reconcile_job(
+    db: Session,
+    *,
+    max_unknown_recovery_sec: int | None = None,
+) -> dict:
+    job = _start_job(db, "stage11_reconcile")
+    try:
+        settings = get_settings()
+        report = reconcile_orders(
+            db,
+            settings=settings,
+            max_unknown_recovery_sec=int(
+                max_unknown_recovery_sec
+                if max_unknown_recovery_sec is not None
+                else settings.stage11_max_unknown_recovery_sec
+            ),
+        )
+        db.commit()
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "recovered": int(report.get("recovered") or 0),
+                "filled": int(report.get("filled") or 0),
+                "safe_cancelled": int(report.get("safe_cancelled") or 0),
+                "still_unknown": int(report.get("still_unknown") or 0),
+            },
+        )
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
 def quality_snapshot_job(db: Session) -> dict:
     job = _start_job(db, "quality_snapshot")
     try:
@@ -747,51 +816,19 @@ def _normalize_signal_direction(value: str | None) -> str | None:
 def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -> dict:
     job = _start_job(db, f"label_signal_history_{hours}h")
     try:
-        now = datetime.now(UTC)
-        target = now - timedelta(hours=hours)
-        field = getattr(SignalHistory, field_name)
-
-        rows = list(
-            db.scalars(
-                select(SignalHistory)
-                .where(
-                    SignalHistory.timestamp <= target,
-                    field.is_(None),
-                )
-                .order_by(SignalHistory.timestamp.asc())
-            )
+        horizon = f"{hours}h"
+        result = label_signal_history_from_snapshots(
+            db,
+            horizon=horizon,
+            batch_size=5000,
+            max_snapshot_lag_hours=max(0.5, float(get_settings().signal_labeling_horizon_lag_hours)),
+            dry_run=False,
         )
-
-        updated = 0
-        skipped_market_missing = 0
-        skipped_probability_unavailable = 0
-        for row in rows:
-            market = db.get(Market, row.market_id)
-            if not market:
-                row.missing_label_reason = "market_missing"
-                skipped_market_missing += 1
-                continue
-            prob = market.probability_yes
-            if prob is None:
-                row.missing_label_reason = "probability_unavailable"
-                skipped_probability_unavailable += 1
-                continue
-            setattr(row, field_name, float(prob))
-            row.labeled_at = now
-            row.missing_label_reason = None
-            updated += 1
-
-        db.commit()
-        result = {
-            "horizon_hours": hours,
-            "target_before_ts": target.isoformat(),
-            "candidates": len(rows),
-            "updated": updated,
-            "skipped_market_missing": skipped_market_missing,
-            "skipped_probability_unavailable": skipped_probability_unavailable,
-        }
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
+        if result.get("status") == "ok":
+            _finish_job(db, job, "SUCCESS", result)
+            return {"status": "ok", "result": result}
+        _finish_job(db, job, "FAILED", result)
+        return {"status": "error", "error": result.get("error", "labeling_failed"), "result": result}
     except Exception as exc:  # noqa: BLE001
         _finish_job(db, job, "FAILED", {"error": str(exc)})
         return {"status": "error", "error": str(exc)}

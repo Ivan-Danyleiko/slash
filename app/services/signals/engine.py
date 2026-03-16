@@ -156,22 +156,41 @@ class SignalEngine:
         return {"rules_analyses": len(markets), "liquidity_analyses": len(markets)}
 
     def detect_divergence(self) -> dict[str, int]:
-        divergence_detector = DivergenceDetector()
+        divergence_detector = DivergenceDetector(settings=self.settings)
         pairs = list(self.db.scalars(select(DuplicateMarketPair)))
         flagged = 0
+        flagged_gross = 0
+        flagged_net = 0
 
         for pair in pairs:
             market_a = self.db.get(Market, pair.market_a_id)
             market_b = self.db.get(Market, pair.market_b_id)
             if not market_a or not market_b:
                 continue
-            divergence = divergence_detector.divergence(market_a, market_b)
-            pair.divergence_score = divergence
-            if divergence is not None and divergence >= self.settings.signal_divergence_threshold:
-                flagged += 1
+            gross = divergence_detector.divergence(market_a, market_b)
+            exec_res = divergence_detector.compute_executable_divergence(market_a, market_b)
+            if gross is not None and gross >= self.settings.signal_divergence_threshold:
+                flagged_gross += 1
+
+            if self.settings.signal_divergence_use_executable:
+                threshold_value = exec_res.net_edge_after_costs if exec_res is not None else None
+                pair.divergence_score = threshold_value
+                if threshold_value is not None and threshold_value >= self.settings.signal_divergence_net_edge_min:
+                    flagged += 1
+                    flagged_net += 1
+            else:
+                pair.divergence_score = gross
+                if gross is not None and gross >= self.settings.signal_divergence_threshold:
+                    flagged += 1
 
         self.db.commit()
-        return {"pairs_processed": len(pairs), "divergence_flagged": flagged}
+        return {
+            "pairs_processed": len(pairs),
+            "divergence_flagged": flagged,
+            "divergence_flagged_gross": flagged_gross,
+            "divergence_flagged_net": flagged_net,
+            "use_executable": bool(self.settings.signal_divergence_use_executable),
+        }
 
     def generate_signals(self) -> dict[str, int]:
         has_stage7_ref = exists(
@@ -260,7 +279,12 @@ class SignalEngine:
                 else:
                     duplicate_cooldown_blocked += 1
 
-            if pair.divergence_score is None or pair.divergence_score < self.settings.signal_divergence_threshold:
+            threshold = (
+                self.settings.signal_divergence_net_edge_min
+                if self.settings.signal_divergence_use_executable
+                else self.settings.signal_divergence_threshold
+            )
+            if pair.divergence_score is None or pair.divergence_score < threshold:
                 divergence_below_threshold += 1
                 continue
 
@@ -273,6 +297,23 @@ class SignalEngine:
             signal_direction = None
             if market_a and market_b and market_a.probability_yes is not None and market_b.probability_yes is not None:
                 signal_direction = "YES" if float(market_a.probability_yes) < float(market_b.probability_yes) else "NO"
+            exec_meta = None
+            if market_a and market_b:
+                exec_res = DivergenceDetector(settings=self.settings).compute_executable_divergence(market_a, market_b)
+                if exec_res is not None:
+                    exec_meta = {
+                        "gross_divergence": round(exec_res.gross_divergence, 6),
+                        "executable_divergence": round(exec_res.executable_divergence, 6),
+                        "net_edge_after_costs": round(exec_res.net_edge_after_costs, 6),
+                        "has_clob_data": bool(exec_res.has_clob_data),
+                        "spread_a": round(exec_res.spread_a, 6),
+                        "spread_b": round(exec_res.spread_b, 6),
+                        "ask_a": round(exec_res.ask_a, 6),
+                        "bid_a": round(exec_res.bid_a, 6),
+                        "ask_b": round(exec_res.ask_b, 6),
+                        "bid_b": round(exec_res.bid_b, 6),
+                    }
+
             outcome = self._create_signal_if_not_recent(
                 signal_type=SignalType.DIVERGENCE,
                 market_id=pair.market_a_id,
@@ -283,7 +324,13 @@ class SignalEngine:
                 liquidity_score=pair_liquidity,
                 divergence_score=pair.divergence_score,
                 signal_direction=signal_direction,
-                metadata_json={"threshold": self.settings.signal_divergence_threshold},
+                metadata_json={
+                    "threshold": threshold,
+                    "threshold_mode": "net_edge_after_costs" if self.settings.signal_divergence_use_executable else "gross",
+                    "signal_divergence_threshold": self.settings.signal_divergence_threshold,
+                    "signal_divergence_net_edge_min": self.settings.signal_divergence_net_edge_min,
+                    **(exec_meta or {}),
+                },
             )
             if outcome == "created":
                 created += 1
