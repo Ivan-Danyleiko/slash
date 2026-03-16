@@ -39,6 +39,49 @@ from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.telegram_product import TelegramProductService
 
 
+def _cleanup_stale_running_jobs(
+    db: Session,
+    *,
+    job_name: str,
+    stale_minutes: int,
+) -> int:
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(minutes=max(1, int(stale_minutes)))
+    stale_rows = list(
+        db.scalars(
+            select(JobRun).where(
+                JobRun.job_name == job_name,
+                JobRun.status == "RUNNING",
+                JobRun.started_at < stale_before,
+            )
+        )
+    )
+    for stale in stale_rows:
+        stale.status = "FAILED"
+        stale.finished_at = now
+        stale.details = {
+            "error": "stale_timeout",
+            "note": f"auto-closed by guard for {job_name}",
+        }
+    if stale_rows:
+        db.commit()
+    return len(stale_rows)
+
+
+def _is_recent_running_job(db: Session, *, job_name: str, stale_minutes: int) -> bool:
+    stale_before = datetime.now(UTC) - timedelta(minutes=max(1, int(stale_minutes)))
+    running_exists = db.scalar(
+        select(func.count())
+        .select_from(JobRun)
+        .where(
+            JobRun.job_name == job_name,
+            JobRun.status == "RUNNING",
+            JobRun.started_at >= stale_before,
+        )
+    )
+    return int(running_exists or 0) > 0
+
+
 def _start_job(db: Session, name: str) -> JobRun:
     job = JobRun(job_name=name, status="RUNNING", details={})
     db.add(job)
@@ -68,6 +111,9 @@ def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
 
 
 def analyze_markets_job(db: Session) -> dict:
+    _cleanup_stale_running_jobs(db, job_name="analyze_markets", stale_minutes=30)
+    if _is_recent_running_job(db, job_name="analyze_markets", stale_minutes=30):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "analyze_markets")
     try:
         result = SignalEngine(db).run()
@@ -79,37 +125,8 @@ def analyze_markets_job(db: Session) -> dict:
 
 
 def detect_duplicates_job(db: Session) -> dict:
-    now = datetime.now(UTC)
-    stale_before = now - timedelta(minutes=45)
-    stale_rows = list(
-        db.scalars(
-            select(JobRun).where(
-                JobRun.job_name == "detect_duplicates",
-                JobRun.status == "RUNNING",
-                JobRun.started_at < stale_before,
-            )
-        )
-    )
-    for stale in stale_rows:
-        stale.status = "FAILED"
-        stale.finished_at = now
-        stale.details = {
-            "error": "stale_timeout",
-            "note": "auto-closed by detect_duplicates guard",
-        }
-    if stale_rows:
-        db.commit()
-
-    running_exists = db.scalar(
-        select(func.count())
-        .select_from(JobRun)
-        .where(
-            JobRun.job_name == "detect_duplicates",
-            JobRun.status == "RUNNING",
-            JobRun.started_at >= stale_before,
-        )
-    )
-    if int(running_exists or 0) > 0:
+    _cleanup_stale_running_jobs(db, job_name="detect_duplicates", stale_minutes=45)
+    if _is_recent_running_job(db, job_name="detect_duplicates", stale_minutes=45):
         return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "detect_duplicates")
     try:
@@ -133,6 +150,9 @@ def analyze_rules_job(db: Session) -> dict:
 
 
 def detect_divergence_job(db: Session) -> dict:
+    _cleanup_stale_running_jobs(db, job_name="detect_divergence", stale_minutes=30)
+    if _is_recent_running_job(db, job_name="detect_divergence", stale_minutes=30):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "detect_divergence")
     try:
         result = SignalEngine(db).detect_divergence()
@@ -144,6 +164,9 @@ def detect_divergence_job(db: Session) -> dict:
 
 
 def generate_signals_job(db: Session) -> dict:
+    _cleanup_stale_running_jobs(db, job_name="generate_signals", stale_minutes=30)
+    if _is_recent_running_job(db, job_name="generate_signals", stale_minutes=30):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "generate_signals")
     try:
         result = SignalEngine(db).generate_signals()
@@ -846,7 +869,11 @@ def _normalize_signal_direction(value: str | None) -> str | None:
 
 
 def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -> dict:
-    job = _start_job(db, f"label_signal_history_{hours}h")
+    job_name = f"label_signal_history_{hours}h"
+    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=40)
+    if _is_recent_running_job(db, job_name=job_name, stale_minutes=40):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
+    job = _start_job(db, job_name)
     try:
         horizon = f"{hours}h"
         result = label_signal_history_from_snapshots(
@@ -867,7 +894,11 @@ def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -
 
 
 def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, batch_size: int = 2000) -> dict:
-    job = _start_job(db, f"label_signal_history_{minutes}m")
+    job_name = f"label_signal_history_{minutes}m"
+    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=40)
+    if _is_recent_running_job(db, job_name=job_name, stale_minutes=40):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
+    job = _start_job(db, job_name)
     try:
         now = datetime.now(UTC)
         target = now - timedelta(minutes=minutes)
