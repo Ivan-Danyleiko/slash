@@ -86,6 +86,7 @@ def _load_signal_history_rows_compat(db: Session, *, cutoff: datetime, limit: in
             "signal_type",
             "timestamp",
             "platform",
+            "source_tag",
             "market_id",
             "probability_at_signal",
             "divergence",
@@ -167,6 +168,93 @@ def _source_count_from_consensus(consensus: dict[str, Any] | None) -> int:
     return sum(1 for k in keys if _safe_float(consensus.get(k)) is not None)
 
 
+def _normalize_core_category(raw: Any, *, title: str = "") -> str:
+    text = str(raw or "").strip().lower()
+    title_text = str(title or "").strip().lower()
+    merged = f"{text} {title_text}".strip()
+    if not text:
+        text = merged
+
+    # Exact category-field matches (common values from Polymarket/Manifold/Metaculus)
+    if text in {
+        "crypto", "cryptocurrency", "defi", "nfts", "bitcoin", "ethereum",
+        "blockchain", "web3",
+    }:
+        return "crypto"
+    if text in {
+        "finance", "economics", "business", "stocks", "macro", "market",
+        "economy", "markets", "financial", "investing",
+    }:
+        return "finance"
+    if text in {
+        "sports", "sport", "nba", "nfl", "mlb", "nhl", "soccer", "football",
+        "tennis", "olympics", "esports", "gaming", "mma", "boxing",
+    }:
+        return "sports"
+    if text in {
+        "politics", "us-politics", "us-current-affairs", "elections",
+        "government", "policy", "geopolitics", "world", "news",
+        "current-events", "current events",
+    }:
+        return "politics"
+
+    # Keyword search in merged (category + title)
+    if any(k in merged for k in ("btc", "eth", "sol", "xrp", "crypto", "token", "coin", "defi", "nft", "blockchain")):
+        return "crypto"
+    if any(k in merged for k in ("stock", "gdp", "cpi", "fed", "interest rate", "econom", "finance", "market cap",
+                                  "s&p", "nasdaq", "dow", "hedge", "ipo", "revenue", "inflation")):
+        return "finance"
+    if any(k in merged for k in ("sport", "nba", "nfl", "mlb", "nhl", "soccer", "football", "match",
+                                  "tournament", "olympic", "tennis", "championship", "league", "fifa",
+                                  "mma", "boxing", "ufc")):
+        return "sports"
+    if any(k in merged for k in ("elect", "president", "senate", "congress", "government", "politic", "policy",
+                                  "vote", "ballot", "democrat", "republican", "prime minister", "parliament",
+                                  "geopolit", "war", "nato", "ukraine", "russia")):
+        return "politics"
+    return "other"
+
+
+def _infer_signal_direction(history_row: Any, signal: Signal | None) -> str | None:
+    explicit = str(_hget(history_row, "signal_direction") or "").strip().upper()
+    if explicit in {"YES", "NO"}:
+        return explicit
+    signal_type = str(_hget(history_row, "signal_type") or (signal.signal_type if signal is not None else "")).strip().upper()
+    if signal_type == "RULES_RISK":
+        return "NO"
+    if signal_type == "DIVERGENCE":
+        p0 = _safe_float(_hget(history_row, "probability_at_signal"))
+        related = _safe_float(_hget(history_row, "related_market_probability"))
+        if p0 is not None and related is not None:
+            return "YES" if p0 < related else "NO"
+    return None
+
+
+def _resolve_direction_aware_success(history_row: Any, *, signal_direction: str | None) -> bool | None:
+    resolved_outcome = str(_hget(history_row, "resolved_outcome") or "").strip().upper()
+    if resolved_outcome == "VOID":
+        return None
+    if signal_direction in {"YES", "NO"} and resolved_outcome in {"YES", "NO"}:
+        return resolved_outcome == signal_direction
+
+    p0 = _safe_float(_hget(history_row, "probability_at_signal"))
+    resolved_probability = _safe_float(_hget(history_row, "resolved_probability"))
+    if signal_direction in {"YES", "NO"} and p0 is not None and resolved_probability is not None:
+        if signal_direction == "YES":
+            return resolved_probability > p0
+        return resolved_probability < p0
+
+    legacy = _hget(history_row, "resolved_success")
+    if legacy is None:
+        return None
+    legacy_bool = bool(legacy)
+    if signal_direction == "YES":
+        return legacy_bool
+    if signal_direction == "NO":
+        return not legacy_bool
+    return legacy_bool
+
+
 def _bootstrap_ci(values: list[float], *, n_sims: int = 500, conf_level: float = 0.80, seed: int = 42) -> tuple[float, float]:
     if not values:
         return (0.0, 0.0)
@@ -242,6 +330,10 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
     scenarios: list[dict[str, Any]] = []
     positive = 0
     keep_rows = [r for r in rows if str(r.get("agent_decision") or "") == "KEEP"]
+    # Fallback: when no pipeline KEEP decisions exist (e.g. divergence-candidate rows without
+    # Stage7/8 data), evaluate all resolved rows as if the signal was taken.
+    if not keep_rows:
+        keep_rows = [r for r in rows if r.get("resolved_success_direction_aware") is not None]
     for size in position_sizes:
         for spread in spreads:
             for fee in fees:
@@ -250,6 +342,10 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 vals: list[float] = []
                 for row in keep_rows:
                     edge = float(row.get("predicted_edge_after_costs_pct") or 0.0)
+                    if edge == 0.0:
+                        # No execution analysis: use half of the divergence score as a rough
+                        # edge estimate (assumes market converges ~50% of the divergence gap).
+                        edge = float((row.get("features_snapshot") or {}).get("divergence") or 0.0) * 0.5
                     resolved = row.get("resolved_success_direction_aware")
                     if resolved is None:
                         realized = edge
@@ -375,6 +471,10 @@ def build_stage10_replay_report(
     data_insufficient_timeline_count = 0
     timeline_source_counts: dict[str, int] = defaultdict(int)
     skipped_missing_signal_id = 0
+    skipped_probability_t_missing = 0
+    direction_missing_count = 0
+    direction_present_count = 0
+    direction_inferred_count = 0
 
     for h in hist_rows:
         signal_id = int(_hget(h, "signal_id") or 0)
@@ -397,6 +497,9 @@ def build_stage10_replay_report(
             snapshots=snapshots_by_market.get(market_id, []),
         )
         prob_t = _safe_float(timeline.probability_t)
+        if prob_t is None:
+            skipped_probability_t_missing += 1
+            continue
         timeline_source = str(timeline.source or "none")
         timeline_sufficient = bool(timeline.sufficient)
         if not timeline_sufficient:
@@ -438,8 +541,23 @@ def build_stage10_replay_report(
         policy_decision = str(s8.base_decision if s8 else (s7.base_decision if s7 else "SKIP"))
         agent_decision = str(s8.decision if s8 else (s7.decision if s7 else "SKIP"))
         execution_action = str(s8.execution_action if s8 else "SHADOW_ONLY")
-        category = str((market.category if market and market.category else "other") or "other").strip().lower()
+        category_raw = (market.category if market and market.category else "other") or "other"
+        market_title = str(getattr(market, "title", "") or "")
+        category = _normalize_core_category(category_raw, title=market_title)
         categories[category] += 1
+        signal_direction_explicit = str(_hget(h, "signal_direction") or "").strip().upper()
+        signal_direction = _infer_signal_direction(h, signal)
+        if signal_direction_explicit in {"YES", "NO"}:
+            direction_present_count += 1
+        elif signal_direction in {"YES", "NO"}:
+            direction_inferred_count += 1
+        else:
+            direction_missing_count += 1
+
+        resolved_success_direction_aware = _resolve_direction_aware_success(
+            h,
+            signal_direction=signal_direction,
+        )
 
         payload = {
             "signal_history_id": int(_hget(h, "id") or 0),
@@ -458,7 +576,8 @@ def build_stage10_replay_report(
             "predicted_edge_after_costs_pct": predicted_edge,
             "cost_components": cost_components,
             "resolved_outcome": str(_hget(h, "resolved_outcome") or "PENDING"),
-            "resolved_success_direction_aware": _hget(h, "resolved_success"),
+            "resolved_success_direction_aware": resolved_success_direction_aware,
+            "signal_direction_used": signal_direction or "",
             "trace_id": str((s7.evidence_bundle or {}).get("trace_id") if s7 and isinstance(s7.evidence_bundle, dict) else ""),
             "input_hash": str(s7.input_hash if s7 else ""),
             "model_version": str(s7.model_version if s7 else ""),
@@ -488,10 +607,22 @@ def build_stage10_replay_report(
         for r in rows
         if r.get("resolved_success_direction_aware") is not None and str(r.get("resolved_outcome") or "").upper() != "VOID"
     ]
+    def _row_effective_edge(r: dict[str, Any]) -> float:
+        """Return the best available edge estimate for a row.
+
+        If the signal went through the full execution pipeline, use the stored
+        predicted_edge_after_costs_pct.  Otherwise fall back to half the divergence
+        score as a rough proxy (assumes markets converge ~50% of the gap on average).
+        """
+        edge = float(r.get("predicted_edge_after_costs_pct") or 0.0)
+        if edge == 0.0:
+            edge = float((r.get("features_snapshot") or {}).get("divergence") or 0.0) * 0.5
+        return edge
+
     post_cost_returns = [
-        float(r.get("predicted_edge_after_costs_pct") or 0.0)
+        _row_effective_edge(r)
         if bool(r.get("resolved_success_direction_aware"))
-        else -abs(float(r.get("predicted_edge_after_costs_pct") or 0.0))
+        else -abs(_row_effective_edge(r))
         for r in resolved_rows
     ]
     ev_mean = (sum(post_cost_returns) / len(post_cost_returns)) if post_cost_returns else 0.0
@@ -500,11 +631,8 @@ def build_stage10_replay_report(
     category_returns: dict[str, list[float]] = defaultdict(list)
     for r in resolved_rows:
         cat = str(r.get("category") or "other").strip().lower() or "other"
-        ret = (
-            float(r.get("predicted_edge_after_costs_pct") or 0.0)
-            if bool(r.get("resolved_success_direction_aware"))
-            else -abs(float(r.get("predicted_edge_after_costs_pct") or 0.0))
-        )
+        edge = _row_effective_edge(r)
+        ret = edge if bool(r.get("resolved_success_direction_aware")) else -abs(edge)
         category_returns[cat].append(ret)
     core_categories = ("crypto", "finance", "sports", "politics")
     core_category_ev_ci_low_80: dict[str, float] = {}
@@ -551,6 +679,9 @@ def build_stage10_replay_report(
             "post_cost_ev_ci_high_80": ev_ci_high,
             "core_category_ev_ci_low_80": core_category_ev_ci_low_80,
             "core_category_positive_ev_candidates": int(core_category_positive_ev_candidates),
+            "direction_missing_count": int(direction_missing_count),
+            "direction_present_count": int(direction_present_count),
+            "direction_inferred_count": int(direction_inferred_count),
             "precision_at_10": precision_at_10,
             "precision_at_25": precision_at_25,
             "precision_at_50": precision_at_50,
@@ -563,6 +694,7 @@ def build_stage10_replay_report(
             "core_categories_each_ge_20": all(v >= 20 for v in categories_core.values()),
             "timeline_source_counts": dict(timeline_source_counts),
             "skipped_missing_signal_id": skipped_missing_signal_id,
+            "skipped_probability_t_missing": int(skipped_probability_t_missing),
         },
         "leakage_reason_counts": dict(leakage_counts),
         "scenario_sweeps": sweeps,

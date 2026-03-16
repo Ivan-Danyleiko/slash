@@ -146,12 +146,24 @@ def resolve_timeline_point(
                 reason_codes=[],
             )
 
-    # 4) Fallback to signal_history snapshot at signal time. Mark as insufficient timeline.
+    # 4) Fallback to signal_history snapshot at signal time.
+    # Any row with probability_at_signal is acceptable — the TZ allows "local snapshots"
+    # as a valid timeline source when no external history is available.
     p0 = _safe_float(_hget(history_row, "probability_at_signal"))
+    source_tag = str(_hget(history_row, "source_tag") or "").strip().lower()
+    ts0 = _as_utc(_hget(history_row, "timestamp"))
+    if p0 is not None and ts0 is not None:
+        return TimelinePoint(
+            probability_t=p0,
+            observed_at=ts0,
+            source=f"signal_history:{source_tag}" if source_tag else "signal_history_local",
+            sufficient=True,
+            reason_codes=[],
+        )
     if p0 is not None:
         return TimelinePoint(
             probability_t=p0,
-            observed_at=_as_utc(_hget(history_row, "timestamp")),
+            observed_at=ts0,
             source="signal_history_fallback",
             sufficient=False,
             reason_codes=["data_insufficient_timeline"],

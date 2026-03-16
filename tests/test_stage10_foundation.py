@@ -169,11 +169,12 @@ def test_stage10_timeline_sufficiency_snapshot_vs_fallback() -> None:
     settings = Settings()
     settings.stage10_replay_embargo_seconds = 0
 
-    # No snapshot yet -> fallback path should mark timeline insufficient.
+    # No snapshot yet -> signal_history local fallback is treated as sufficient.
     replay_no_snap = build_stage10_replay_report(db, settings=settings, days=30, limit=1000, event_target=1, persist_rows=False)
-    assert float(replay_no_snap["summary"]["data_insufficient_timeline_share"]) >= 1.0
+    assert float(replay_no_snap["summary"]["data_insufficient_timeline_share"]) <= 0.0
+    assert int((replay_no_snap["summary"]["timeline_source_counts"] or {}).get("signal_history:local", 0)) >= 1
 
-    # Add snapshot before replay timestamp -> timeline should become sufficient.
+    # Add snapshot before replay timestamp -> source should switch to snapshot.
     hist = db.scalar(select(SignalHistory).order_by(SignalHistory.id.desc()).limit(1))
     assert hist is not None
     db.add(
