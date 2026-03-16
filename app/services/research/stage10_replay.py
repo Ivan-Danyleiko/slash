@@ -245,6 +245,38 @@ def _row_effective_edge(row: dict[str, Any]) -> float:
     return _fallback_edge_proxy(row)
 
 
+def _prediction_market_return(row: dict[str, Any], *, won: bool) -> float:
+    """Asymmetric prediction-market payoff for a binary market.
+
+    Prediction markets are zero-sum: buying YES at price p pays (1-p) on win
+    and loses p on loss.  Using the symmetric ±edge model is incorrect and
+    systematically under-estimates EV for low-probability YES bets.
+
+    Falls back to the symmetric _row_effective_edge model when the probability
+    is not available (e.g. the row came from the execution pipeline with a
+    known edge but no raw price).
+    """
+    predicted_edge = float(row.get("predicted_edge_after_costs_pct") or 0.0)
+    if predicted_edge != 0.0:
+        # Pipeline-computed edge is already net of costs — keep it symmetric.
+        return predicted_edge if won else -abs(predicted_edge)
+
+    features = dict(row.get("features_snapshot") or {})
+    p_t = _safe_float(features.get("probability_t"))
+    direction = str(row.get("signal_direction_used") or "").strip().upper()
+
+    if p_t is not None and direction in {"YES", "NO"}:
+        p = max(0.01, min(0.99, float(p_t)))
+        if direction == "YES":
+            return (1.0 - p) if won else -p
+        else:  # NO direction: selling YES / buying NO at price (1-p)
+            return p if won else -(1.0 - p)
+
+    # Symmetric fallback when direction or probability is unknown.
+    edge = _fallback_edge_proxy(row)
+    return edge if won else -abs(edge)
+
+
 def _infer_signal_direction(history_row: Any, signal: Signal | None) -> str | None:
     explicit = str(_hget(history_row, "signal_direction") or "").strip().upper()
     if explicit in {"YES", "NO"}:
@@ -377,12 +409,11 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 stress_costs = spread + fee + size_penalty
                 vals: list[float] = []
                 for row in keep_rows:
-                    edge = _row_effective_edge(row)
                     resolved = row.get("resolved_success_direction_aware")
                     if resolved is None:
-                        realized = edge
+                        realized = _row_effective_edge(row)
                     else:
-                        realized = edge if bool(resolved) else -abs(edge)
+                        realized = _prediction_market_return(row, won=bool(resolved))
                     vals.append(realized - stress_costs)
                 mean_ret = (sum(vals) / len(vals)) if vals else -stress_costs
                 ok = mean_ret > 0.0
@@ -640,9 +671,7 @@ def build_stage10_replay_report(
         if r.get("resolved_success_direction_aware") is not None and str(r.get("resolved_outcome") or "").upper() != "VOID"
     ]
     post_cost_returns = [
-        _row_effective_edge(r)
-        if bool(r.get("resolved_success_direction_aware"))
-        else -abs(_row_effective_edge(r))
+        _prediction_market_return(r, won=bool(r.get("resolved_success_direction_aware")))
         for r in resolved_rows
     ]
     ev_mean = (sum(post_cost_returns) / len(post_cost_returns)) if post_cost_returns else 0.0
@@ -651,8 +680,7 @@ def build_stage10_replay_report(
     category_returns: dict[str, list[float]] = defaultdict(list)
     for r in resolved_rows:
         cat = str(r.get("category") or "other").strip().lower() or "other"
-        edge = _row_effective_edge(r)
-        ret = edge if bool(r.get("resolved_success_direction_aware")) else -abs(edge)
+        ret = _prediction_market_return(r, won=bool(r.get("resolved_success_direction_aware")))
         category_returns[cat].append(ret)
     core_categories = ("crypto", "finance", "sports", "politics")
     core_category_ev_ci_low_80: dict[str, float] = {}

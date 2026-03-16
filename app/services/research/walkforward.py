@@ -33,12 +33,23 @@ def _parse_signal_type(signal_type: str | None) -> SignalType | None:
 
 
 def _extract_return(row: SignalHistory, *, horizon: str) -> float | None:
+    """Return direction-aware probability change for the given horizon.
+
+    For YES signals (or undirected): return p1 - p0  (positive = price rose = win).
+    For NO signals: return p0 - p1  (positive = price fell = win).
+    This makes the walkforward metric measure actual signal profitability rather than
+    raw probability change, which would wrongly count NO-signal wins as losses.
+    """
     field = _HORIZON_TO_FIELD[horizon]
     p0 = row.probability_at_signal
     p1 = getattr(row, field)
     if p0 is None or p1 is None:
         return None
-    return float(p1) - float(p0)
+    raw = float(p1) - float(p0)
+    direction = str(getattr(row, "signal_direction") or "").strip().upper()
+    if direction == "NO":
+        return -raw  # invert: for NO signals, price drop is a win
+    return raw
 
 
 def _as_utc(ts: datetime | None) -> datetime | None:
