@@ -271,8 +271,11 @@ def _prediction_market_return(row: dict[str, Any], *, won: bool) -> float:
     """Asymmetric prediction-market payoff for a binary market.
 
     Prediction markets are zero-sum: buying YES at price p pays (1-p) on win
-    and loses p on loss.  Using the symmetric ±edge model is incorrect and
-    systematically under-estimates EV for low-probability YES bets.
+    and loses p on loss.
+
+    Important: for legacy replay rows without real signal context (signal_id=0),
+    asymmetric payout on inferred directions is often too noisy. For such rows
+    we keep the symmetric edge proxy to avoid introducing artificial negativity.
 
     Falls back to the symmetric _row_effective_edge model when the probability
     is not available (e.g. the row came from the execution pipeline with a
@@ -282,6 +285,12 @@ def _prediction_market_return(row: dict[str, Any], *, won: bool) -> float:
     if predicted_edge != 0.0:
         # Pipeline-computed edge is already net of costs — keep it symmetric.
         return predicted_edge if won else -abs(predicted_edge)
+
+    signal_id = int(row.get("signal_id") or 0)
+    if signal_id <= 0:
+        # Legacy candidate/backfill rows (no signal context): use edge proxy.
+        edge = _fallback_edge_proxy(row)
+        return edge if won else -abs(edge)
 
     features = dict(row.get("features_snapshot") or {})
     p_t = _safe_float(features.get("probability_t"))
