@@ -31,6 +31,16 @@ def _settings(**overrides):
         "agent_policy_min_confidence": 0.4,
         "agent_policy_min_liquidity": 0.5,
         "agent_policy_version": "policy_v1",
+        "signal_execution_v2_prior_crypto": 0.025,
+        "signal_execution_v2_prior_finance": 0.020,
+        "signal_execution_v2_prior_sports": 0.015,
+        "signal_execution_v2_prior_politics": 0.025,
+        "signal_execution_v2_prior_other": 0.020,
+        "signal_execution_v2_prior_default": 0.020,
+        "signal_execution_polymarket_fee_mode": "zero",
+        "signal_execution_polymarket_negrisk_impact_multiplier": 1.0,
+        "signal_execution_kalshi_taker_coeff": 0.07,
+        "signal_execution_kalshi_maker_fee_pct": 0.003,
     }
     base.update(overrides)
     return SimpleNamespace(**base)

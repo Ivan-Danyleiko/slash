@@ -422,7 +422,7 @@ def _reason_code_stability(rows: list[dict[str, Any]]) -> float:
     return float(stable / total)
 
 
-def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _scenario_sweeps(rows: list[dict[str, Any]], *, use_real_returns: bool = True) -> dict[str, Any]:
     position_sizes = [50.0, 100.0, 500.0]
     spreads = [0.01, 0.03, 0.05]
     fees = [0.02, 0.025]
@@ -433,33 +433,54 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Stage7/8 data), evaluate all resolved rows as if the signal was taken.
     if not keep_rows:
         keep_rows = [r for r in rows if r.get("resolved_success_direction_aware") is not None]
+    total_keep = len(keep_rows)
+    keep_with_real = sum(1 for r in keep_rows if r.get("resolved_success_direction_aware") is not None)
+    real_coverage = (keep_with_real / total_keep) if total_keep else 0.0
+    sweeps_using_real_returns = 0
+    sweeps_using_proxy = 0
+    positive_scenarios_real = 0
+    positive_scenarios_proxy = 0
     for size in position_sizes:
         for spread in spreads:
             for fee in fees:
                 size_penalty = 0.002 if size == 50.0 else (0.004 if size == 100.0 else 0.01)
                 stress_costs = spread + fee + size_penalty
                 vals: list[float] = []
+                real_used = 0
+                proxy_used = 0
                 for row in keep_rows:
-                    # Scenario sweeps use the normalized edge proxy, not the raw asymmetric
-                    # payoff.  The sweep is a policy stress-test: "if we bet this edge under
-                    # these costs, do we profit?"  Raw prediction-market payoffs vary wildly
-                    # with price level and obscure the policy comparison.
-                    edge = _row_effective_edge(row)
                     resolved = row.get("resolved_success_direction_aware")
-                    if resolved is None:
-                        realized = edge
+                    if use_real_returns and resolved is not None:
+                        realized = _prediction_market_return(row, won=bool(resolved))
+                        real_used += 1
                     else:
-                        realized = edge if bool(resolved) else -abs(edge)
+                        # Fallback when no labeled outcome is available: normalized edge proxy.
+                        edge = _row_effective_edge(row)
+                        if resolved is None:
+                            realized = edge
+                        else:
+                            realized = edge if bool(resolved) else -abs(edge)
+                        proxy_used += 1
                     vals.append(realized - stress_costs)
                 mean_ret = (sum(vals) / len(vals)) if vals else -stress_costs
                 ok = mean_ret > 0.0
                 if ok:
                     positive += 1
+                if real_used > 0:
+                    sweeps_using_real_returns += 1
+                    if ok:
+                        positive_scenarios_real += 1
+                else:
+                    sweeps_using_proxy += 1
+                    if ok:
+                        positive_scenarios_proxy += 1
                 scenarios.append(
                     {
                         "position_size_usd": size,
                         "spread": spread,
                         "fee": fee,
+                        "real_rows": int(real_used),
+                        "proxy_rows": int(proxy_used),
                         "mean_post_cost_return": round(float(mean_ret), 6),
                         "positive": ok,
                     }
@@ -469,6 +490,11 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "positive_scenarios": positive,
         "total_scenarios": len(scenarios),
         "passes_12_of_18": positive >= 12,
+        "sweeps_using_real_returns": int(sweeps_using_real_returns),
+        "sweeps_using_proxy": int(sweeps_using_proxy),
+        "real_return_coverage": round(float(real_coverage), 6),
+        "positive_scenarios_real": int(positive_scenarios_real),
+        "positive_scenarios_proxy": int(positive_scenarios_proxy),
         "rows": scenarios,
     }
 

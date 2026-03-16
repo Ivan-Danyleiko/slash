@@ -13,6 +13,20 @@ from app.models.models import Market, SignalHistory
 from app.services.research.stage10_replay import _bootstrap_ci
 
 
+def _canonical_category(raw: str | None, *, title: str = "") -> str:
+    text = str(raw or "").strip().lower()
+    merged = f"{text} {str(title or '').strip().lower()}".strip()
+    if any(k in merged for k in ("btc", "eth", "crypto", "token", "coin", "defi", "bitcoin", "ethereum", "solana")):
+        return "crypto"
+    if any(k in merged for k in ("sport", "nba", "nfl", "mlb", "nhl", "soccer", "football", "tennis", "ufc", "world cup")):
+        return "sports"
+    if any(k in merged for k in ("elect", "president", "senate", "congress", "politic", "policy", "war", "nato", "ukraine")):
+        return "politics"
+    if any(k in merged for k in ("finance", "stock", "gdp", "cpi", "fed", "inflation", "nasdaq", "dow", "treasury", "bond")):
+        return "finance"
+    return "other"
+
+
 def _direction_aware_return(row: SignalHistory, after: float) -> float | None:
     if row.probability_at_signal is None:
         return None
@@ -57,7 +71,11 @@ def main() -> None:
             ret = _direction_aware_return(row, float(row.probability_after_6h))
             if ret is None:
                 continue
-            category = str((market_by_id.get(row.market_id).category if market_by_id.get(row.market_id) else "other") or "other").strip().lower()
+            market = market_by_id.get(row.market_id)
+            category = _canonical_category(
+                market.category if market else "other",
+                title=market.title if market else "",
+            )
             by_category[category].append(ret)
 
     for cat, vals in sorted(by_category.items()):

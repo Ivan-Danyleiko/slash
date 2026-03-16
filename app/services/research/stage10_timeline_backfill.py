@@ -93,8 +93,9 @@ def build_stage10_timeline_backfill_plan(
         elif platform == "METACULUS":
             has_timeline = _payload_has_list(payload, "metaculus_prediction_history")
         elif platform == "POLYMARKET":
-            # Snapshot-driven timeline is accepted for Polymarket.
-            has_timeline = True
+            # Conservative default: require explicit timeline data. Snapshot availability
+            # is validated in replay (MarketSnapshot <= replay timestamp), not here.
+            has_timeline = _payload_has_list(payload, "polymarket_price_history")
 
         if has_timeline:
             ready[platform] = ready.get(platform, 0) + 1

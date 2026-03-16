@@ -207,6 +207,12 @@ class Settings(BaseSettings):
         default="openai",
         alias="STAGE7_AGENT_PROVIDER_PROFILE",
     )
+    stage7_ensemble_enabled: bool = Field(default=False, alias="STAGE7_ENSEMBLE_ENABLED")
+    stage7_ensemble_models: str = Field(
+        default="gpt-4o-mini,claude-haiku-4-5",
+        alias="STAGE7_ENSEMBLE_MODELS",
+    )
+    stage7_ensemble_voting: str = Field(default="majority", alias="STAGE7_ENSEMBLE_VOTING")
     stage8_policy_profile: str = Field(default="bootstrap_v1", alias="STAGE8_POLICY_PROFILE")
     stage8_policy_version: str = Field(default="stage8_bootstrap_v1", alias="STAGE8_POLICY_VERSION")
     stage8_category_confidence_floor: float = Field(

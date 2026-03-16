@@ -927,6 +927,39 @@ def label_signal_history_24h_job(db: Session) -> dict:
     return _label_signal_history_horizon(db, hours=24, field_name="probability_after_24h")
 
 
+def label_signal_history_job(
+    db: Session,
+    *,
+    batch_size: int = 1000,
+    max_snapshot_lag_hours: float = 2.0,
+    dry_run: bool = False,
+) -> dict:
+    job = _start_job(db, "label_signal_history")
+    try:
+        results: dict[str, dict] = {}
+        for horizon in ("1h", "6h", "24h"):
+            results[horizon] = label_signal_history_from_snapshots(
+                db,
+                horizon=horizon,
+                batch_size=batch_size,
+                max_snapshot_lag_hours=max_snapshot_lag_hours,
+                dry_run=dry_run,
+            )
+        payload = {
+            "dry_run": bool(dry_run),
+            "batch_size": int(batch_size),
+            "max_snapshot_lag_hours": float(max_snapshot_lag_hours),
+            "updated_total": int(sum(int((results.get(h) or {}).get("updated") or 0) for h in results)),
+            "candidates_total": int(sum(int((results.get(h) or {}).get("candidates") or 0) for h in results)),
+            "by_horizon": results,
+        }
+        _finish_job(db, job, "SUCCESS", payload)
+        return {"status": "ok", "result": payload}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
 def label_signal_history_resolution_job(db: Session) -> dict:
     job = _start_job(db, "label_signal_history_resolution")
     try:

@@ -15,6 +15,8 @@ from app.tasks.jobs import (
     stage9_track_job,
     stage10_track_job,
     stage10_timeline_backfill_job,
+    stage11_track_job,
+    stage11_reconcile_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
     label_signal_history_1h_job,
@@ -22,6 +24,7 @@ from app.tasks.jobs import (
     label_signal_history_30m_job,
     label_signal_history_6h_job,
     label_signal_history_24h_job,
+    label_signal_history_job,
     label_signal_history_resolution_job,
     provider_contract_checks_job,
     signal_push_job,
@@ -174,6 +177,15 @@ def label_signal_history_24h_task() -> dict:
         db.close()
 
 
+@celery_app.task(name="label_signal_history")
+def label_signal_history_task() -> dict:
+    db = SessionLocal()
+    try:
+        return label_signal_history_job(db)
+    finally:
+        db.close()
+
+
 @celery_app.task(name="label_signal_history_resolution")
 def label_signal_history_resolution_task() -> dict:
     db = SessionLocal()
@@ -246,6 +258,24 @@ def stage10_timeline_backfill_task() -> dict:
         db.close()
 
 
+@celery_app.task(name="stage11_track")
+def stage11_track_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage11_track_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage11_reconcile")
+def stage11_reconcile_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage11_reconcile_job(db)
+    finally:
+        db.close()
+
+
 celery_app.conf.beat_schedule = {
     "sync-platforms-every-15-min": {
         "task": "sync_all_platforms",
@@ -271,6 +301,7 @@ celery_app.conf.beat_schedule = {
     "label-signal-history-1h-hourly": {"task": "label_signal_history_1h", "schedule": crontab(minute=12)},
     "label-signal-history-6h": {"task": "label_signal_history_6h", "schedule": crontab(hour="*/6", minute=18)},
     "label-signal-history-24h": {"task": "label_signal_history_24h", "schedule": crontab(hour=1, minute=25)},
+    "label-signal-history-daily": {"task": "label_signal_history", "schedule": crontab(hour=2, minute=0)},
     "label-signal-history-resolution-hourly": {
         "task": "label_signal_history_resolution",
         "schedule": crontab(minute=10),
@@ -283,4 +314,6 @@ celery_app.conf.beat_schedule = {
     "stage9-track-daily": {"task": "stage9_track", "schedule": crontab(hour=3, minute=5)},
     "stage10-timeline-backfill-daily": {"task": "stage10_timeline_backfill", "schedule": crontab(hour=3, minute=10)},
     "stage10-track-daily": {"task": "stage10_track", "schedule": crontab(hour=3, minute=15)},
+    "stage11-reconcile-every-10-min": {"task": "stage11_reconcile", "schedule": crontab(minute="*/10")},
+    "stage11-track-daily": {"task": "stage11_track", "schedule": crontab(hour=3, minute=25)},
 }

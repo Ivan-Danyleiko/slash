@@ -249,6 +249,7 @@ def test_resolution_labeling_job_marks_resolved_success() -> None:
     history_row = SignalHistory(
         signal_id=None,
         signal_type=SignalType.ARBITRAGE_CANDIDATE,
+        signal_direction="YES",
         timestamp=now - timedelta(days=2),
         platform="P",
         market_id=market.id,
@@ -487,6 +488,13 @@ def test_label_signal_history_1h_job_labels_all_past_unlabeled_rows() -> None:
         simulated_trade=None,
     )
     db.add(old_row)
+    # Snapshot at signal_time + 1h (within 2h lag window)
+    snap = MarketSnapshot(
+        market_id=market.id,
+        probability_yes=0.57,
+        fetched_at=now - timedelta(hours=2, minutes=17) + timedelta(hours=1, minutes=10),
+    )
+    db.add(snap)
     db.commit()
 
     result = label_signal_history_1h_job(db)

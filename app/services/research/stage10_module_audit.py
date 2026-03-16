@@ -55,11 +55,27 @@ def _candidate_availability(name: str, settings: Settings) -> dict[str, Any]:
     }
 
     if "openai" in lname:
-        checks["api_key_present"] = bool(str(settings.stage7_openai_api_key or "").strip())
-        checks["provider_sdk_present"] = _module_present("openai")
+        # Plain API candidate can run via OpenAI-compatible providers (OpenAI/Gemini/Groq/OpenRouter).
+        checks["api_key_present"] = any(
+            bool(str(v or "").strip())
+            for v in (
+                settings.stage7_openai_api_key,
+                settings.gemini_api_key,
+                settings.groq_api_key,
+                settings.openrouter_api_key,
+            )
+        )
+        checks["provider_sdk_present"] = _module_present("httpx") or _module_present("openai")
     if "anthropic" in lname:
-        checks["api_key_present"] = bool(str(os.getenv("ANTHROPIC_API_KEY", "")).strip())
-        checks["provider_sdk_present"] = _module_present("anthropic")
+        # Anthropic path can also be proxied through OpenRouter in this project.
+        checks["api_key_present"] = any(
+            bool(str(v or "").strip())
+            for v in (
+                os.getenv("ANTHROPIC_API_KEY", ""),
+                settings.openrouter_api_key,
+            )
+        )
+        checks["provider_sdk_present"] = _module_present("httpx") or _module_present("anthropic")
     if "langgraph" in lname:
         checks["module_present"] = _module_present("langgraph")
     if "llamaindex" in lname:

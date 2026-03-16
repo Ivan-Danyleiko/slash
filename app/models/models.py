@@ -379,6 +379,129 @@ class Stage10ReplayRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Stage11Client(Base):
+    __tablename__ = "stage11_clients"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_stage11_clients_code"),
+        Index("ix_stage11_clients_active", "is_active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    custody_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="CLIENT_SIGNED")
+    runtime_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="SHADOW")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    risk_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Stage11ClientWallet(Base):
+    __tablename__ = "stage11_client_wallets"
+    __table_args__ = (
+        Index("ix_stage11_client_wallets_client_id", "client_id"),
+        UniqueConstraint("client_id", "wallet_address", name="uq_stage11_wallet_client_address"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("stage11_clients.id"), nullable=False)
+    wallet_address: Mapped[str] = mapped_column(String(256), nullable=False)
+    wallet_type: Mapped[str] = mapped_column(String(32), nullable=False, default="POLYGON")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    provider_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Stage11Order(Base):
+    __tablename__ = "stage11_orders"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_stage11_orders_idempotency_key"),
+        Index("ix_stage11_orders_client_created", "client_id", "created_at"),
+        Index("ix_stage11_orders_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("stage11_clients.id"), nullable=False)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False, default="POLYMARKET")
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # YES/NO
+    size_bucket: Mapped[str] = mapped_column(String(16), nullable=False)
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    requested_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False, default="stage11_v1")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
+    venue_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    submit_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    unknown_recovery_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    order_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    response_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Stage11Fill(Base):
+    __tablename__ = "stage11_fills"
+    __table_args__ = (
+        Index("ix_stage11_fills_client_order", "client_id", "order_id"),
+        Index("ix_stage11_fills_filled_at", "filled_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("stage11_clients.id"), nullable=False)
+    order_id: Mapped[int] = mapped_column(ForeignKey("stage11_orders.id"), nullable=False)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_size_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fee_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fill_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Stage11ClientPosition(Base):
+    __tablename__ = "stage11_client_positions"
+    __table_args__ = (
+        Index("ix_stage11_positions_client_market", "client_id", "market_id"),
+        Index("ix_stage11_positions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("stage11_clients.id"), nullable=False)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Stage11TradingAuditEvent(Base):
+    __tablename__ = "stage11_trading_audit_events"
+    __table_args__ = (
+        Index("ix_stage11_audit_client_created", "client_id", "created_at"),
+        Index("ix_stage11_audit_event_type", "event_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("stage11_clients.id"), nullable=False)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("stage11_orders.id"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="INFO")
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    payload_checksum: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class WatchlistItem(Base):
     __tablename__ = "watchlist_items"
     __table_args__ = (

@@ -23,9 +23,17 @@ def _settings(disclaimer: str) -> SimpleNamespace:
         signal_top_min_utility_score=0.08,
         signal_top_max_missing_rules_share=0.35,
         signal_top_min_confidence_missing_rules=0.35,
+        signal_top_rules_risk_min_confidence=0.35,
+        signal_top_rules_risk_min_liquidity=0.30,
         signal_top_allow_fallback_when_empty=True,
         signal_top_use_v2_selection=True,
         signal_top_v2_rank_by_score_total=True,
+        signal_top_appendix_c_enabled=False,
+        signal_rank_weight_edge=0.35,
+        signal_rank_weight_liquidity=0.25,
+        signal_rank_weight_execution_safety=0.20,
+        signal_rank_weight_freshness=0.10,
+        signal_rank_weight_confidence=0.10,
     )
 
 

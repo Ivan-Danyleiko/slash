@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
 from app.db.session import get_db
+from app.services.research.signal_history_labeler import label_signal_history_from_snapshots
 from app.tasks.jobs import (
     analyze_markets_job,
     cleanup_signal_history_job,
@@ -72,6 +73,23 @@ def label_signal_history_24h(db: Session = Depends(get_db)) -> dict:
 @router.post("/label-signal-history/resolution", dependencies=[Depends(require_admin)])
 def label_signal_history_resolution(db: Session = Depends(get_db)) -> dict:
     return label_signal_history_resolution_job(db)
+
+
+@router.post("/label-signal-history", dependencies=[Depends(require_admin)])
+def label_signal_history(
+    horizon: str = Query(default="6h", description="1h | 6h | 24h"),
+    batch_size: int = Query(default=1000, ge=1, le=100000),
+    max_snapshot_lag_hours: float = Query(default=2.0, ge=0.1, le=48.0),
+    dry_run: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    return label_signal_history_from_snapshots(
+        db,
+        horizon=horizon,
+        batch_size=batch_size,
+        max_snapshot_lag_hours=max_snapshot_lag_hours,
+        dry_run=dry_run,
+    )
 
 
 @router.post("/cleanup-signal-history", dependencies=[Depends(require_admin)])
