@@ -285,9 +285,9 @@ celery_app.conf.beat_schedule = {
         "task": "analyze_markets",
         "schedule": crontab(minute="2-59/15"),
     },
-    "detect-duplicates-every-20-min": {
+    "detect-duplicates-every-2h": {
         "task": "detect_duplicates",
-        "schedule": crontab(minute="*/20"),
+        "schedule": crontab(minute=5, hour="*/2"),
     },
     "analyze-rules-every-20-min": {"task": "analyze_rules", "schedule": crontab(minute="*/20")},
     "detect-divergence-every-20-min": {"task": "detect_divergence", "schedule": crontab(minute="*/20")},

@@ -113,13 +113,19 @@ class SignalEngine:
         }
 
     def analyze_rules(self) -> dict[str, int]:
-        markets = list(self.db.scalars(select(Market)))
+        # Only re-analyze markets synced in the last 25 min (sync runs every 15 min).
+        # Older markets keep their existing analysis — it's still valid.
+        cutoff = datetime.now(UTC) - timedelta(minutes=25)
+        markets = list(self.db.scalars(select(Market).where(Market.fetched_at >= cutoff)))
+        if not markets:
+            return {"rules_analyses": 0, "liquidity_analyses": 0}
+        market_ids = [m.id for m in markets]
         rules = RulesRiskAnalyzer()
         weird = WeirdMarketDetector()
         liquidity = LiquidityAnalyzer()
 
-        self.db.execute(delete(RulesAnalysis))
-        self.db.execute(delete(LiquidityAnalysis))
+        self.db.execute(delete(RulesAnalysis).where(RulesAnalysis.market_id.in_(market_ids)))
+        self.db.execute(delete(LiquidityAnalysis).where(LiquidityAnalysis.market_id.in_(market_ids)))
 
         for market in markets:
             rules_result = rules.analyze(market)
@@ -162,9 +168,21 @@ class SignalEngine:
         flagged_gross = 0
         flagged_net = 0
 
+        # Batch-load all needed markets in one query instead of N+1 db.get() calls.
+        if pairs:
+            pair_market_ids = set()
+            for pair in pairs:
+                pair_market_ids.add(pair.market_a_id)
+                pair_market_ids.add(pair.market_b_id)
+            markets_by_id: dict[int, Market] = {
+                m.id: m for m in self.db.scalars(select(Market).where(Market.id.in_(pair_market_ids)))
+            }
+        else:
+            markets_by_id = {}
+
         for pair in pairs:
-            market_a = self.db.get(Market, pair.market_a_id)
-            market_b = self.db.get(Market, pair.market_b_id)
+            market_a = markets_by_id.get(pair.market_a_id)
+            market_b = markets_by_id.get(pair.market_b_id)
             if not market_a or not market_b:
                 continue
             gross = divergence_detector.divergence(market_a, market_b)
@@ -250,6 +268,13 @@ class SignalEngine:
         liquidity_by_market = {row.market_id: row.score for row in liquidity_rows}
         rules_rows = list(self.db.scalars(select(RulesAnalysis)))
         rules_by_market = {row.market_id: row.score for row in rules_rows}
+
+        # Pre-load all markets referenced by rules_rows to avoid N+1 db.get() in the rules loop below.
+        rules_market_ids = [row.market_id for row in rules_rows]
+        rules_markets_by_id: dict[int, Market] = {
+            m.id: m
+            for m in self.db.scalars(select(Market).where(Market.id.in_(rules_market_ids)))
+        } if rules_market_ids else {}
         excluded_tokens = [
             x.strip().lower() for x in self.settings.signal_arbitrage_exclude_keywords.split(",") if x.strip()
         ]
@@ -341,7 +366,7 @@ class SignalEngine:
 
         fallback_rules_candidates: list[tuple[Market, float, float, dict]] = []
         for row in rules_rows:
-            market = self.db.get(Market, row.market_id)
+            market = rules_markets_by_id.get(row.market_id)
             if not market:
                 continue
 
@@ -452,7 +477,13 @@ class SignalEngine:
             else:
                 rules_cooldown_blocked += 1
 
-        snapshots = list(self.db.scalars(select(MarketSnapshot).order_by(MarketSnapshot.market_id, MarketSnapshot.fetched_at.desc())))
+        # Only load recent snapshots — older ones can't produce a "recent move" signal.
+        snap_cutoff = datetime.now(UTC) - timedelta(days=7)
+        snapshots = list(self.db.scalars(
+            select(MarketSnapshot)
+            .where(MarketSnapshot.fetched_at >= snap_cutoff)
+            .order_by(MarketSnapshot.market_id, MarketSnapshot.fetched_at.desc())
+        ))
         last_two: dict[int, list[MarketSnapshot]] = {}
         for snap in snapshots:
             bucket = last_two.setdefault(snap.market_id, [])
