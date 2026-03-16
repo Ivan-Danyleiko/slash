@@ -79,6 +79,16 @@ def analyze_markets_job(db: Session) -> dict:
 
 
 def detect_duplicates_job(db: Session) -> dict:
+    running_exists = db.scalar(
+        select(func.count())
+        .select_from(JobRun)
+        .where(
+            JobRun.job_name == "detect_duplicates",
+            JobRun.status == "RUNNING",
+        )
+    )
+    if int(running_exists or 0) > 0:
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "detect_duplicates")
     try:
         result = SignalEngine(db).detect_duplicates()

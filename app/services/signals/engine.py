@@ -42,8 +42,9 @@ class SignalEngine:
     def detect_duplicates(self) -> dict[str, int]:
         now = datetime.now(UTC)
         incremental_hours = max(1, int(getattr(self.settings, "signal_duplicate_incremental_hours", 6)))
-        max_anchor_markets = max(50, int(getattr(self.settings, "signal_duplicate_max_anchor_markets", 800)))
-        max_broad_pairs = max(1000, int(getattr(self.settings, "signal_duplicate_max_pairs_per_run", 20000)))
+        max_anchor_markets = max(20, int(getattr(self.settings, "signal_duplicate_max_anchor_markets", 120)))
+        max_candidate_markets = max(500, int(getattr(self.settings, "signal_duplicate_max_candidate_markets", 5000)))
+        max_broad_pairs = max(500, int(getattr(self.settings, "signal_duplicate_max_pairs_per_run", 6000)))
         cutoff = now - timedelta(hours=incremental_hours)
 
         anchor_markets = list(
@@ -66,7 +67,13 @@ class SignalEngine:
                 "anchors_processed": 0,
                 "candidates_processed": 0,
             }
-        markets = list(self.db.scalars(select(Market)))
+        markets = list(
+            self.db.scalars(
+                select(Market)
+                .order_by(Market.fetched_at.desc(), Market.id.desc())
+                .limit(max_candidate_markets)
+            )
+        )
         strict_detector = DuplicateDetector.with_profile(profile="strict")
         balanced_detector = DuplicateDetector.with_profile(profile="balanced")
         aggressive_detector = DuplicateDetector.with_profile(profile="aggressive")
