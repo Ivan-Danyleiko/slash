@@ -12,6 +12,11 @@ from app.tasks.jobs import (
     detect_duplicates_job,
     generate_signals_job,
     quality_snapshot_job,
+    stage9_track_job,
+    stage10_track_job,
+    stage10_timeline_backfill_job,
+    stage8_final_report_job,
+    stage8_shadow_ledger_job,
     label_signal_history_1h_job,
     label_signal_history_15m_job,
     label_signal_history_30m_job,
@@ -196,6 +201,51 @@ def provider_contract_checks_task() -> dict:
         db.close()
 
 
+@celery_app.task(name="stage8_shadow_ledger")
+def stage8_shadow_ledger_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage8_shadow_ledger_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage8_final_report")
+def stage8_final_report_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage8_final_report_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage9_track")
+def stage9_track_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage9_track_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage10_track")
+def stage10_track_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage10_track_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage10_timeline_backfill")
+def stage10_timeline_backfill_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage10_timeline_backfill_job(db)
+    finally:
+        db.close()
+
+
 celery_app.conf.beat_schedule = {
     "sync-platforms-every-15-min": {
         "task": "sync_all_platforms",
@@ -228,4 +278,9 @@ celery_app.conf.beat_schedule = {
     "cleanup-old-signals-nightly": {"task": "cleanup_old_signals", "schedule": crontab(hour=3, minute=0)},
     "cleanup-signal-history-nightly": {"task": "cleanup_signal_history", "schedule": crontab(hour=3, minute=20)},
     "provider-contract-checks-hourly": {"task": "provider_contract_checks", "schedule": crontab(minute=40)},
+    "stage8-shadow-ledger-daily": {"task": "stage8_shadow_ledger", "schedule": crontab(hour=2, minute=45)},
+    "stage8-final-report-daily": {"task": "stage8_final_report", "schedule": crontab(hour=2, minute=55)},
+    "stage9-track-daily": {"task": "stage9_track", "schedule": crontab(hour=3, minute=5)},
+    "stage10-timeline-backfill-daily": {"task": "stage10_timeline_backfill", "schedule": crontab(hour=3, minute=10)},
+    "stage10-track-daily": {"task": "stage10_track", "schedule": crontab(hour=3, minute=15)},
 }

@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     polymarket_api_base_url: str = Field(
         default="https://gamma-api.polymarket.com", alias="POLYMARKET_API_BASE_URL"
     )
+    polymarket_clob_api_base_url: str = Field(
+        default="https://clob.polymarket.com", alias="POLYMARKET_CLOB_API_BASE_URL"
+    )
+    polymarket_clob_enabled: bool = Field(default=False, alias="POLYMARKET_CLOB_ENABLED")
+    polymarket_clob_api_key: str = Field(default="", alias="POLYMARKET_CLOB_API_KEY")
+    kalshi_api_base_url: str = Field(
+        default="https://api.elections.kalshi.com/trade-api/v2", alias="KALSHI_API_BASE_URL"
+    )
+    kalshi_historical_api_base_url: str = Field(
+        default="https://api.elections.kalshi.com/trade-api/v2/historical", alias="KALSHI_HISTORICAL_API_BASE_URL"
+    )
+    kalshi_api_key: str = Field(default="", alias="KALSHI_API_KEY")
+    kalshi_enabled: bool = Field(default=False, alias="KALSHI_ENABLED")
 
     signal_duplicate_threshold: float = Field(default=85.0, alias="SIGNAL_DUPLICATE_THRESHOLD")
     signal_duplicate_broad_threshold: float = Field(default=75.0, alias="SIGNAL_DUPLICATE_BROAD_THRESHOLD")
@@ -131,6 +144,12 @@ class Settings(BaseSettings):
     signal_execution_v2_horizon: str = Field(default="6h", alias="SIGNAL_EXECUTION_V2_HORIZON")
     signal_execution_v2_lookback_days: int = Field(default=60, alias="SIGNAL_EXECUTION_V2_LOOKBACK_DAYS")
     signal_execution_v2_min_samples: int = Field(default=30, alias="SIGNAL_EXECUTION_V2_MIN_SAMPLES")
+    signal_execution_v2_prior_default: float = Field(default=0.02, alias="SIGNAL_EXECUTION_V2_PRIOR_DEFAULT")
+    signal_execution_v2_prior_crypto: float = Field(default=0.025, alias="SIGNAL_EXECUTION_V2_PRIOR_CRYPTO")
+    signal_execution_v2_prior_finance: float = Field(default=0.02, alias="SIGNAL_EXECUTION_V2_PRIOR_FINANCE")
+    signal_execution_v2_prior_sports: float = Field(default=0.015, alias="SIGNAL_EXECUTION_V2_PRIOR_SPORTS")
+    signal_execution_v2_prior_politics: float = Field(default=0.02, alias="SIGNAL_EXECUTION_V2_PRIOR_POLITICS")
+    signal_execution_v2_prior_other: float = Field(default=0.015, alias="SIGNAL_EXECUTION_V2_PRIOR_OTHER")
     signal_execution_position_size_usd: float = Field(default=100.0, alias="SIGNAL_EXECUTION_POSITION_SIZE_USD")
     signal_execution_polymarket_mode: str = Field(
         default="gamma_api",
@@ -143,6 +162,22 @@ class Settings(BaseSettings):
     signal_execution_polymarket_bridge_fee_usd: float = Field(
         default=0.0,
         alias="SIGNAL_EXECUTION_POLYMARKET_BRIDGE_FEE_USD",
+    )
+    signal_execution_polymarket_fee_mode: str = Field(
+        default="zero",
+        alias="SIGNAL_EXECUTION_POLYMARKET_FEE_MODE",
+    )
+    signal_execution_polymarket_negrisk_impact_multiplier: float = Field(
+        default=0.7,
+        alias="SIGNAL_EXECUTION_POLYMARKET_NEGRISK_IMPACT_MULTIPLIER",
+    )
+    signal_execution_kalshi_taker_coeff: float = Field(
+        default=0.07,
+        alias="SIGNAL_EXECUTION_KALSHI_TAKER_COEFF",
+    )
+    signal_execution_kalshi_maker_fee_pct: float = Field(
+        default=0.0,
+        alias="SIGNAL_EXECUTION_KALSHI_MAKER_FEE_PCT",
     )
     agent_policy_keep_ev_threshold_pct: float = Field(default=0.02, alias="AGENT_POLICY_KEEP_EV_THRESHOLD_PCT")
     agent_policy_modify_ev_threshold_pct: float = Field(default=0.005, alias="AGENT_POLICY_MODIFY_EV_THRESHOLD_PCT")
@@ -167,6 +202,14 @@ class Settings(BaseSettings):
         default="openai",
         alias="STAGE7_AGENT_PROVIDER_PROFILE",
     )
+    stage8_policy_profile: str = Field(default="bootstrap_v1", alias="STAGE8_POLICY_PROFILE")
+    stage8_policy_version: str = Field(default="stage8_bootstrap_v1", alias="STAGE8_POLICY_VERSION")
+    stage8_category_confidence_floor: float = Field(
+        default=0.60,
+        alias="STAGE8_CATEGORY_CONFIDENCE_FLOOR",
+    )
+    stage10_replay_embargo_seconds: int = Field(default=3600, alias="STAGE10_REPLAY_EMBARGO_SECONDS")
+    stage10_llm_budget_usd_monthly: float = Field(default=100.0, alias="STAGE10_LLM_BUDGET_USD_MONTHLY")
     stage7_openai_api_base_url: str = Field(
         default="https://api.openai.com/v1",
         alias="STAGE7_OPENAI_API_BASE_URL",

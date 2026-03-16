@@ -23,7 +23,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.post("/sync-markets", dependencies=[Depends(require_admin)])
 def sync_markets(
-    platform: str | None = Query(default=None, description="manifold | metaculus | polymarket"),
+    platform: str | None = Query(default=None, description="manifold | metaculus | polymarket | kalshi"),
     db: Session = Depends(get_db),
 ) -> dict:
     return sync_all_platforms_job(db, platform=platform)

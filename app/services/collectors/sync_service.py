@@ -3,6 +3,8 @@ import structlog
 
 from app.models.models import JobRun
 from app.repositories.market_repository import MarketRepository
+from app.core.config import get_settings
+from app.services.collectors.kalshi import KalshiCollector
 from app.services.collectors.manifold import ManifoldCollector
 from app.services.collectors.metaculus import MetaculusCollector
 from app.services.collectors.polymarket import PolymarketCollector
@@ -15,6 +17,8 @@ class CollectorSyncService:
         self.db = db
         self.repo = MarketRepository(db)
         self.collectors = [ManifoldCollector(), MetaculusCollector(), PolymarketCollector()]
+        if get_settings().kalshi_enabled:
+            self.collectors.append(KalshiCollector())
         self.collector_map = {collector.platform_name.lower(): collector for collector in self.collectors}
 
     def _sync_collector(self, collector) -> dict[str, int | str]:
@@ -51,7 +55,7 @@ class CollectorSyncService:
             platform_key = platform.lower()
             collector = self.collector_map.get(platform_key)
             if not collector:
-                return {"error": f"Unsupported platform '{platform}'. Use: manifold, metaculus, polymarket"}
+                return {"error": f"Unsupported platform '{platform}'. Use: manifold, metaculus, polymarket, kalshi"}
             selected_collectors = [collector]
 
         job = JobRun(job_name="sync_all_platforms", status="RUNNING", details={})

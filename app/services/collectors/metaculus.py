@@ -66,6 +66,7 @@ class MetaculusCollector(BaseCollector):
         for row in rows:
             cp = row.get("community_prediction", {})
             yes_prob = cp.get("full", {}).get("q2")
+            payload_row = {**row, "execution_source": "metaculus_api"}
             markets.append(
                 NormalizedMarketDTO(
                     platform=self.platform_name,
@@ -82,7 +83,7 @@ class MetaculusCollector(BaseCollector):
                     created_at=parser.parse(row["created_time"]) if row.get("created_time") else None,
                     resolution_time=parser.parse(row["resolve_time"]) if row.get("resolve_time") else None,
                     rules_text=row.get("resolution_criteria"),
-                    source_payload=row,
+                    source_payload=payload_row,
                 )
             )
         return markets

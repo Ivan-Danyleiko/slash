@@ -81,13 +81,20 @@ class TelegramProductService:
 
     def top_ranked_signals(self, user: User, limit: int = 5) -> list[Signal]:
         rows = list(self.db.scalars(select(Signal).order_by(Signal.created_at.desc()).limit(200)))
+        now = datetime.now(UTC)
+        filtered: list[Signal] = []
+        for signal in rows:
+            market = self.db.get(Market, signal.market_id)
+            if not self._market_is_actionable(market, now=now):
+                continue
+            filtered.append(signal)
         settings = get_settings()
         max_allowed = min(limit, PLAN_LIMITS[user.access_level]["signals"])
         variant = get_ab_variant_for_user(user_id=user.id, settings=settings)
         if variant == settings.research_ab_control_label:
-            top = sorted(rows, key=rank_score, reverse=True)[:max_allowed]
+            top = sorted(filtered, key=rank_score, reverse=True)[:max_allowed]
         else:
-            top = select_top_signals(rows, limit=max_allowed, settings=settings)
+            top = select_top_signals(filtered, limit=max_allowed, settings=settings)
         if variant:
             self.db.add(
                 UserEvent(
@@ -187,3 +194,21 @@ class TelegramProductService:
         payload = {"variant": variant} if variant else None
         self.db.add(UserEvent(user_id=user.id, event_type="market_opened", market_id=market_id, payload_json=payload))
         self.db.commit()
+    @staticmethod
+    def _as_utc(ts: datetime | None) -> datetime | None:
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=UTC)
+        return ts.astimezone(UTC)
+
+    def _market_is_actionable(self, market: Market | None, *, now: datetime) -> bool:
+        if market is None:
+            return False
+        resolution_time = self._as_utc(market.resolution_time)
+        if resolution_time and resolution_time <= now:
+            return False
+        status = (market.status or "").strip().lower()
+        if any(token in status for token in ("resolved", "closed", "settled", "final", "ended", "cancelled", "canceled")):
+            return False
+        return True

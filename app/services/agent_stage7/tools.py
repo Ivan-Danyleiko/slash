@@ -4,9 +4,11 @@ from datetime import UTC, datetime, timedelta
 import re
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.config import Settings
 from app.models.models import Market, Platform, Signal, SignalHistory
 from app.observability.tracing import stage7_span
@@ -36,6 +38,8 @@ _STOPWORDS = {
 _TOKEN_ALIASES = {
     "election": "elect",
     "presidency": "president",
+    "bitcoin": "btc",
+    "btc": "btc",
 }
 
 
@@ -163,35 +167,124 @@ def get_cross_platform_consensus(db: Session, event_id: str) -> dict[str, Any]:
     with stage7_span("stage7.tool.get_cross_platform_consensus"):
         # event_id is normalized event key for Stage 7; currently we use market title as key.
         title = str(event_id or "").strip()
+        reason_codes: list[str] = []
         if not title:
-            return {"event_id": "", "polymarket_prob": None, "manifold_prob": None, "metaculus_median": None}
+            return {
+                "event_id": "",
+                "polymarket_prob": None,
+                "manifold_prob": None,
+                "metaculus_median": None,
+                "consensus_reason_codes": ["event_id_missing"],
+            }
 
         stmt = (
-            select(Platform.name, Market.title, Market.probability_yes)
+            select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
             .join(Platform, Platform.id == Market.platform_id)
             .order_by(Market.fetched_at.desc())
             .limit(400)
         )
         rows = list(db.execute(stmt))
-        best: dict[str, tuple[float, float]] = {}
-        for platform_name, candidate_title, candidate_prob in rows:
+        best: dict[str, tuple[float, float, float]] = {}
+        for platform_name, candidate_title, candidate_prob, candidate_volume, candidate_oi in rows:
             if not isinstance(candidate_prob, (int, float)):
                 continue
             sim = _title_similarity(title, str(candidate_title or ""))
             pname = str(platform_name or "").upper()
             prev = best.get(pname)
             if prev is None or sim > prev[0]:
-                best[pname] = (sim, float(candidate_prob))
-        def _pick(name: str) -> float | None:
+                liquidity_proxy = 0.0
+                if isinstance(candidate_volume, (int, float)):
+                    liquidity_proxy = max(liquidity_proxy, float(candidate_volume))
+                if isinstance(candidate_oi, (int, float)):
+                    liquidity_proxy = max(liquidity_proxy, float(candidate_oi))
+                market_volume = max(1.0, liquidity_proxy)
+                best[pname] = (sim, float(candidate_prob), market_volume)
+
+        def _pick(name: str) -> tuple[float | None, float]:
             item = best.get(name)
-            if item is None or item[0] < 0.25:
-                return None
-            return float(item[1])
+            if item is None or item[0] < 0.40:
+                return None, 0.0
+            return float(item[1]), float(item[2])
+
+        polymarket_prob, w_poly = _pick("POLYMARKET")
+        manifold_prob, w_manifold = _pick("MANIFOLD")
+        metaculus_median, w_meta_db = _pick("METACULUS")
+
+        # If local Metaculus match failed, try direct Metaculus search->detail fallback.
+        if metaculus_median is None:
+            settings = get_settings()
+            token = str(settings.metaculus_api_token or "").strip()
+            if token:
+                headers = {
+                    "Authorization": f"Token {token}",
+                    "Accept": "application/json",
+                    "User-Agent": settings.metaculus_user_agent,
+                }
+                try:
+                    search_resp = httpx.get(
+                        f"{settings.metaculus_api_base_url}/questions/",
+                        params={"search": title, "limit": 5},
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                    if search_resp.status_code == 200:
+                        results = list((search_resp.json() or {}).get("results") or [])
+                        best_row: dict[str, Any] | None = None
+                        best_sim = 0.0
+                        for candidate in results:
+                            sim = _title_similarity(title, str(candidate.get("title") or ""))
+                            if sim >= 0.40 and sim > best_sim:
+                                best_sim = sim
+                                best_row = candidate
+                        if best_row and best_row.get("id") is not None:
+                            detail_resp = httpx.get(
+                                f"{settings.metaculus_api_base_url}/questions/{int(best_row['id'])}/",
+                                headers=headers,
+                                timeout=10.0,
+                            )
+                            if detail_resp.status_code == 200:
+                                detail = detail_resp.json() or {}
+                                cp = (detail.get("community_prediction") or {}).get("full") or {}
+                                q2 = cp.get("q2")
+                                if isinstance(q2, (int, float)):
+                                    metaculus_median = float(q2)
+                                else:
+                                    reason_codes.append("metaculus_detail_missing_q2")
+                            else:
+                                reason_codes.append("metaculus_detail_unavailable")
+                        else:
+                            reason_codes.append("metaculus_search_no_match")
+                except Exception:  # noqa: BLE001
+                    reason_codes.append("metaculus_detail_request_failed")
+            else:
+                reason_codes.append("metaculus_token_missing")
+
+        # Volume-weighted consensus. Metaculus has fixed small weight due no tradable volume.
+        w_meta = 0.10 if metaculus_median is not None else 0.0
+        weighted_parts: list[tuple[float, float]] = []
+        if polymarket_prob is not None:
+            weighted_parts.append((polymarket_prob, max(1.0, w_poly)))
+        if manifold_prob is not None:
+            weighted_parts.append((manifold_prob, max(1.0, w_manifold)))
+        if metaculus_median is not None:
+            weighted_parts.append((metaculus_median, w_meta))
+        consensus_weighted = None
+        if weighted_parts:
+            denom = sum(w for _, w in weighted_parts)
+            if denom > 0:
+                consensus_weighted = sum(p * w for p, w in weighted_parts) / denom
+        present = sum(v is not None for v in (polymarket_prob, manifold_prob, metaculus_median))
+        if present < 2:
+            reason_codes.append("consensus_insufficient_sources")
+        elif present == 2:
+            reason_codes.append("consensus_two_source_mode")
         return {
             "event_id": title,
-            "polymarket_prob": _pick("POLYMARKET"),
-            "manifold_prob": _pick("MANIFOLD"),
-            "metaculus_median": _pick("METACULUS"),
+            "polymarket_prob": polymarket_prob,
+            "manifold_prob": manifold_prob,
+            "metaculus_median": metaculus_median,
+            "consensus_weighted_prob": consensus_weighted,
+            "consensus_reason_codes": reason_codes,
         }
 
 

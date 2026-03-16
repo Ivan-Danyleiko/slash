@@ -268,6 +268,11 @@ class SignalEngine:
             if pair_liquidity < self.settings.signal_divergence_min_pair_liquidity:
                 divergence_low_liquidity_skipped += 1
                 continue
+            market_a = self.db.get(Market, pair.market_a_id)
+            market_b = self.db.get(Market, pair.market_b_id)
+            signal_direction = None
+            if market_a and market_b and market_a.probability_yes is not None and market_b.probability_yes is not None:
+                signal_direction = "YES" if float(market_a.probability_yes) < float(market_b.probability_yes) else "NO"
             outcome = self._create_signal_if_not_recent(
                 signal_type=SignalType.DIVERGENCE,
                 market_id=pair.market_a_id,
@@ -277,6 +282,7 @@ class SignalEngine:
                 confidence_score=min(1.0, pair.divergence_score * 3),
                 liquidity_score=pair_liquidity,
                 divergence_score=pair.divergence_score,
+                signal_direction=signal_direction,
                 metadata_json={"threshold": self.settings.signal_divergence_threshold},
             )
             if outcome == "created":
@@ -348,6 +354,7 @@ class SignalEngine:
                     recent_move=None,
                     signal_type=SignalType.RULES_RISK,
                 ),
+                signal_direction="NO",
                 metadata_json={"flags": row.matched_flags or [], "signal_mode": "explicit_rules_risk"},
             )
             if outcome == "created":
@@ -386,6 +393,7 @@ class SignalEngine:
                     recent_move=None,
                     signal_type=SignalType.RULES_RISK,
                 ),
+                signal_direction="NO",
                 metadata_json={"flags": ["missing_rules_text", "high_liquidity"], "signal_mode": "missing_rules_risk"},
             )
             if outcome == "created":
@@ -404,7 +412,7 @@ class SignalEngine:
             if len(bucket) < 2:
                 bucket.append(snap)
 
-        arbitrage_candidates: list[tuple[Market, float, float, float, str, float]] = []
+        arbitrage_candidates: list[tuple[Market, float, float, float, str, float, float]] = []
         for market in self.db.scalars(select(Market).where(Market.probability_yes.is_not(None))):
             arbitrage_attempted += 1
             title_l = (market.title or "").lower()
@@ -427,7 +435,8 @@ class SignalEngine:
                 arbitrage_no_snapshot_skipped += 1
                 continue
 
-            move = abs((pair[0].probability_yes or 0.0) - (pair[1].probability_yes or 0.0))
+            signed_move = (pair[0].probability_yes or 0.0) - (pair[1].probability_yes or 0.0)
+            move = abs(signed_move)
             midpoint_distance = abs((market.probability_yes or 0.0) - 0.5)
             if (
                 move < self.settings.signal_mode_momentum_min_move
@@ -447,10 +456,10 @@ class SignalEngine:
             if mode == "uncertainty_liquid":
                 confidence = min(confidence, self.settings.signal_mode_uncertainty_max_score)
             snapshot_age_hours = self._hours_since(pair[0].fetched_at)
-            arbitrage_candidates.append((market, confidence, move, midpoint_distance, mode, snapshot_age_hours))
+            arbitrage_candidates.append((market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move))
 
         arbitrage_candidates.sort(key=lambda x: x[1], reverse=True)
-        for market, confidence, move, midpoint_distance, mode, snapshot_age_hours in arbitrage_candidates[
+        for market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move in arbitrage_candidates[
             : self.settings.signal_arbitrage_max_candidates
         ]:
             rr = rules_by_market.get(market.id)
@@ -484,9 +493,11 @@ class SignalEngine:
                     recent_move=move,
                     signal_type=SignalType.ARBITRAGE_CANDIDATE,
                 ),
+                signal_direction="YES" if signed_move >= 0 else "NO",
                 metadata_json={
                     "signal_mode": mode,
                     "recent_move": round(move, 4),
+                    "signed_recent_move": round(signed_move, 4),
                     "distance_from_50": round(midpoint_distance, 4),
                     "snapshot_age_hours": round(snapshot_age_hours, 3),
                     "rules_risk_score": rr,
@@ -701,6 +712,7 @@ class SignalEngine:
                     probability_at_signal=prob_a,
                     related_market_probability=prob_b,
                     divergence=divergence,
+                    signal_direction="YES" if float(prob_a) < float(prob_b) else "NO",
                     liquidity=pair_liquidity,
                     volume_24h=pair_volume,
                     simulated_trade={
@@ -926,6 +938,7 @@ class SignalEngine:
                             probability_at_signal=prob_a,
                             related_market_probability=prob_b,
                             divergence=divergence,
+                            signal_direction="YES" if float(prob_a) < float(prob_b) else "NO",
                             liquidity=pair_liquidity,
                             volume_24h=pair_volume,
                             simulated_trade={
@@ -1089,6 +1102,7 @@ class SignalEngine:
                             probability_at_signal=prob_a,
                             related_market_probability=prob_b,
                             divergence=divergence,
+                            signal_direction="YES" if float(prob_a) < float(prob_b) else "NO",
                             liquidity=pair_liquidity,
                             volume_24h=pair_volume,
                             simulated_trade={
@@ -1128,6 +1142,7 @@ class SignalEngine:
         drop_reason: str | None = None,
         execution_analysis: dict | None = None,
         metadata_json: dict | None = None,
+        signal_direction: str | None = None,
     ) -> str:
         run_now = datetime.now(UTC)
         existing = self.db.scalar(
@@ -1149,6 +1164,7 @@ class SignalEngine:
             existing.drop_reason = drop_reason
             existing.execution_analysis = execution_analysis
             existing.metadata_json = metadata_json
+            existing.signal_direction = signal_direction
             existing.updated_at = run_now
             return "updated"
         created_signal = Signal(
@@ -1166,6 +1182,7 @@ class SignalEngine:
             drop_reason=drop_reason,
             execution_analysis=execution_analysis,
             metadata_json=metadata_json,
+            signal_direction=signal_direction,
             updated_at=run_now,
         )
         self.db.add(created_signal)
@@ -1198,6 +1215,7 @@ class SignalEngine:
                 divergence=signal.divergence_score,
                 liquidity=signal.liquidity_score,
                 volume_24h=market.volume_24h,
+                signal_direction=signal.signal_direction,
                 simulated_trade=signal.execution_analysis,
             )
         )

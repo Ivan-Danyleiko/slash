@@ -27,6 +27,9 @@ from app.services.research.stage8_final_report import (
     build_stage8_final_report,
     extract_stage8_final_report_metrics,
 )
+from app.services.research.stage9_batch import build_stage9_batch_report
+from app.services.research.stage10_batch import build_stage10_batch_report
+from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
 from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
@@ -46,7 +49,7 @@ def _finish_job(db: Session, job: JobRun, status: str, details: dict) -> None:
     db.rollback()
     job.status = status
     job.details = details
-    job.finished_at = datetime.utcnow()
+    job.finished_at = datetime.now(UTC)
     db.commit()
 
 
@@ -329,6 +332,15 @@ def provider_contract_checks_job(db: Session) -> dict:
             params={"limit": 1},
         )
     )
+    if settings.kalshi_enabled:
+        checks.append(
+            _check(
+                "KALSHI",
+                f"{settings.kalshi_api_base_url}/markets",
+                params={"limit": 1, "status": "open"},
+                headers={"Authorization": f"Bearer {settings.kalshi_api_key}"} if settings.kalshi_api_key else None,
+            )
+        )
     if settings.metaculus_api_token:
         checks.append(
             _check(
@@ -414,6 +426,121 @@ def stage8_final_report_job(db: Session, *, lookback_days: int = 14, limit: int 
             tags={"final_decision": str(report.get("final_decision") or "")},
         )
         _finish_job(db, job, "SUCCESS", {"tracking": tracking, "final_decision": report.get("final_decision")})
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
+def stage9_track_job(
+    db: Session,
+    *,
+    days_consensus: int = 14,
+    days_labeling: int = 30,
+    days_execution: int = 14,
+) -> dict:
+    job = _start_job(db, "stage9_track")
+    try:
+        settings = get_settings()
+        report = build_stage9_batch_report(
+            db,
+            settings=settings,
+            days_consensus=days_consensus,
+            days_labeling=days_labeling,
+            days_execution=days_execution,
+        )
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "tracked_runs": len(dict(report.get("tracking") or {})),
+                "consensus_3source_share": float(
+                    ((report.get("reports") or {}).get("stage9_consensus_quality") or {}).get("consensus_3source_share")
+                    or 0.0
+                ),
+                "non_zero_edge_share": float(
+                    ((report.get("reports") or {}).get("stage9_execution_realism") or {}).get("non_zero_edge_share")
+                    or 0.0
+                ),
+            },
+        )
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
+def stage10_track_job(
+    db: Session,
+    *,
+    days: int = 365,
+    limit: int = 5000,
+    event_target: int = 100,
+) -> dict:
+    job = _start_job(db, "stage10_track")
+    try:
+        settings = get_settings()
+        report = build_stage10_batch_report(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+            event_target=event_target,
+        )
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "tracked_runs": len(dict(report.get("tracking") or {})),
+                "events_total": int(
+                    (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get(
+                        "events_total"
+                    )
+                    or 0
+                ),
+                "leakage_violations_count": int(
+                    (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get(
+                        "leakage_violations_count"
+                    )
+                    or 0
+                ),
+            },
+        )
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
+
+
+def stage10_timeline_backfill_job(
+    db: Session,
+    *,
+    days: int = 730,
+    limit: int = 500,
+    per_platform_limit: int = 100,
+) -> dict:
+    job = _start_job(db, "stage10_timeline_backfill")
+    try:
+        settings = get_settings()
+        report = run_stage10_timeline_backfill(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+            per_platform_limit=per_platform_limit,
+            dry_run=False,
+        )
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "updated_rows": int(report.get("updated_rows") or 0),
+                "total_candidates": int(report.get("total_candidates") or 0),
+            },
+        )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
         _finish_job(db, job, "FAILED", {"error": str(exc)})
@@ -553,12 +680,22 @@ def _as_utc(ts: datetime | None) -> datetime | None:
 
 
 def _market_is_resolved(market: Market, *, now: datetime) -> bool:
+    payload = market.source_payload or {}
+    status = (market.status or "").strip().lower()
+    # Some providers (notably Kalshi) can be CLOSED before final settlement outcome is available.
+    if "closed" in status:
+        settlement_timer = payload.get("settlement_timer_seconds")
+        has_outcome = any(
+            payload.get(k) is not None for k in ("resolution", "resolvedOutcome", "outcome", "result", "resolutionProbability")
+        )
+        if settlement_timer is not None and not has_outcome:
+            return False
     if _as_utc(market.resolution_time) and _as_utc(market.resolution_time) <= now:
         return True
-    status = (market.status or "").strip().lower()
-    if any(token in status for token in ("resolved", "closed", "settled", "final", "ended")):
+    if any(token in status for token in ("resolved", "settled", "final", "ended")):
         return True
-    payload = market.source_payload or {}
+    if "closed" in status:
+        return True
     if isinstance(payload.get("isResolved"), bool) and payload.get("isResolved"):
         return True
     if isinstance(payload.get("resolved"), bool) and payload.get("resolved"):
@@ -582,6 +719,28 @@ def _extract_resolved_probability(market: Market) -> float | None:
 
     if market.probability_yes is not None:
         return float(market.probability_yes)
+    return None
+
+
+def _extract_resolved_outcome(market: Market, resolved_probability: float | None) -> str:
+    payload = market.source_payload or {}
+    for key in ("isVoid", "voided", "isCancelled", "cancelled", "isNull", "nullified"):
+        value = payload.get(key)
+        if value in (True, 1, "1", "true", "yes", "YES"):
+            return "VOID"
+    for key in ("resolution", "resolvedOutcome", "outcome", "result"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip().upper() in {"VOID", "N/A", "NA", "CANCELLED", "CANCELED", "NULL"}:
+            return "VOID"
+    if isinstance(resolved_probability, (int, float)):
+        return "YES" if float(resolved_probability) >= 0.5 else "NO"
+    return "PENDING"
+
+
+def _normalize_signal_direction(value: str | None) -> str | None:
+    token = str(value or "").strip().upper()
+    if token in {"YES", "NO"}:
+        return token
     return None
 
 
@@ -759,16 +918,42 @@ def label_signal_history_resolution_job(db: Session) -> dict:
             checked += 1
             if resolved_probability is None:
                 skipped_no_probability += 1
+                row.resolved_outcome = "PENDING"
                 row.missing_label_reason = "resolved_probability_unavailable"
                 continue
 
             row.resolved_probability = float(resolved_probability)
-            if row.probability_at_signal is not None:
-                row.resolved_success = bool(float(resolved_probability) > float(row.probability_at_signal))
+            row.resolved_outcome = _extract_resolved_outcome(market, resolved_probability)
+            payload = market.source_payload or {}
+            is_disputed = bool(payload.get("disputed")) or bool(payload.get("isDisputed"))
+            if is_disputed:
+                row.resolved_success = None
+                row.missing_label_reason = "oracle_dispute_risk"
+                row.resolution_checked_at = now
+                updated += 1
+                continue
+            direction = _normalize_signal_direction(row.signal_direction)
+            if direction is None and row.signal_id:
+                signal = db.get(Signal, row.signal_id)
+                if signal:
+                    direction = _normalize_signal_direction(signal.signal_direction)
+                    row.signal_direction = direction
+
+            if row.resolved_outcome == "VOID":
+                row.resolved_success = None
+                row.missing_label_reason = "void_resolution"
+            elif row.probability_at_signal is not None and direction in {"YES", "NO"}:
+                if direction == "YES":
+                    row.resolved_success = bool(float(resolved_probability) > float(row.probability_at_signal))
+                else:
+                    row.resolved_success = bool(float(resolved_probability) < float(row.probability_at_signal))
             else:
                 row.resolved_success = None
+                if direction not in {"YES", "NO"}:
+                    row.missing_label_reason = "direction_missing"
             row.resolution_checked_at = now
-            row.missing_label_reason = None
+            if row.resolved_success is not None:
+                row.missing_label_reason = None
             updated += 1
 
         db.commit()

@@ -55,6 +55,14 @@ class Market(Base):
     rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    spread_cents: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_bid_yes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_ask_yes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    execution_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_neg_risk: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional_value_dollars: Mapped[float | None] = mapped_column(Float, nullable=True)
+    previous_yes_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     platform: Mapped[Platform] = relationship()
 
@@ -92,6 +100,7 @@ class Signal(Base):
     score_breakdown_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     drop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    signal_direction: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -137,6 +146,8 @@ class SignalHistory(Base):
     probability_after_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
     resolved_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
     resolved_success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    resolved_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    signal_direction: Mapped[str | None] = mapped_column(String(8), nullable=True)
     labeled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     missing_label_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -260,7 +271,7 @@ class Stage7AgentDecision(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), nullable=False)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
     input_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     base_decision: Mapped[str] = mapped_column(String(32), nullable=False)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -274,6 +285,97 @@ class Stage7AgentDecision(Base):
     provider_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     tool_snapshot_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     llm_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Stage8Decision(Base):
+    __tablename__ = "stage8_decisions"
+    __table_args__ = (
+        Index("ix_stage8_decisions_created_at", "created_at"),
+        Index("ix_stage8_decisions_category", "category"),
+        Index("ix_stage8_decisions_execution_action", "execution_action"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), nullable=False)
+    stage7_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stage7_agent_decisions.id"), nullable=True
+    )
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    category_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    rules_ambiguity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resolution_source_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dispute_risk_flag: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    edge_after_costs: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_action: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    hard_block_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    evidence_bundle: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    kelly_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl_proxy_usd_100: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Stage8Position(Base):
+    __tablename__ = "stage8_positions"
+    __table_args__ = (
+        Index("ix_stage8_positions_status_category", "status", "category"),
+        Index("ix_stage8_positions_status_event_key", "status", "event_key"),
+        Index("ix_stage8_positions_market_status", "market_id", "status"),
+        Index("ix_stage8_positions_opened_at", "opened_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), nullable=False)
+    stage8_decision_id: Mapped[int | None] = mapped_column(ForeignKey("stage8_decisions.id"))
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)  # YES/NO
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exposure_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Stage10ReplayRow(Base):
+    __tablename__ = "stage10_replay_rows"
+    __table_args__ = (
+        UniqueConstraint("signal_history_id", name="uq_stage10_replay_signal_history"),
+        Index("ix_stage10_replay_event_ts", "event_id", "replay_timestamp"),
+        Index("ix_stage10_replay_category_ts", "category", "replay_timestamp"),
+        Index("ix_stage10_replay_input_hash", "input_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_history_id: Mapped[int] = mapped_column(ForeignKey("signal_history.id"), nullable=False)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), nullable=False)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    replay_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    feature_observed_at_max: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    feature_source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    features_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    policy_decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    agent_decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_action: Mapped[str] = mapped_column(String(32), nullable=False)
+    predicted_edge_after_costs_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_components: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    resolved_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    resolved_success_direction_aware: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    input_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    leakage_violation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    leakage_reason_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

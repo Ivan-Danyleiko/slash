@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.models import JobRun
 
-_KNOWN_PLATFORMS = ("MANIFOLD", "METACULUS", "POLYMARKET")
+_KNOWN_PLATFORMS = ("MANIFOLD", "METACULUS", "POLYMARKET", "KALSHI")
 
 
 def _normalize_sync_details(details: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

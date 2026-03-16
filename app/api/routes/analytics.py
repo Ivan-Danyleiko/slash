@@ -124,12 +124,51 @@ from app.services.research.stage7_shadow import (
     build_stage7_shadow_report,
     extract_stage7_shadow_metrics,
 )
+from app.services.research.stage8_shadow_ledger import (
+    build_stage8_shadow_ledger_report,
+    extract_stage8_shadow_ledger_metrics,
+)
+from app.services.research.stage8_final_report import (
+    build_stage8_final_report,
+    extract_stage8_final_report_metrics,
+)
+from app.services.research.stage8_batch import build_stage8_batch_report
+from app.services.research.stage9_batch import build_stage9_batch_report
+from app.services.research.stage9_final_report import build_stage9_final_report
+from app.services.research.stage9_reports import (
+    build_stage9_consensus_quality_report,
+    build_stage9_directional_labeling_report,
+    build_stage9_execution_realism_report,
+)
+from app.services.research.stage10_batch import build_stage10_batch_report
+from app.services.research.stage10_final_report import (
+    build_stage10_final_report,
+    extract_stage10_final_report_metrics,
+)
+from app.services.research.stage10_module_audit import (
+    build_stage10_module_audit_report,
+    extract_stage10_module_audit_metrics,
+)
+from app.services.research.stage10_replay import (
+    build_stage10_replay_report,
+    extract_stage10_replay_metrics,
+)
+from app.services.research.stage10_timeline_quality import build_stage10_timeline_quality_report
+from app.services.research.stage10_timeline_backfill import build_stage10_timeline_backfill_plan
+from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
 from app.services.research.stage7_final_report import (
     build_stage7_final_report,
     extract_stage7_final_report_metrics,
 )
 from app.services.research.tracking import read_stage5_experiments, record_stage5_experiment
 from app.services.agent.policy import build_agent_decision_report
+from app.services.agent_stage8 import (
+    classify_market_category,
+    evaluate_rules_fields,
+    get_category_policy,
+    get_category_policy_profile,
+    profile_summary,
+)
 from app.services.signals.ranking import select_top_signals
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -2355,6 +2394,65 @@ def research_stage7_shadow(
     )
 
 
+@router.get("/research/stage8/shadow-ledger")
+def research_stage8_shadow_ledger(
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    limit: int = Query(default=300, ge=50, le=5000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage8_shadow_ledger_report(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+
+
+@router.get("/research/stage8/category-policies")
+def research_stage8_category_policies() -> dict:
+    settings = get_settings()
+    profile_name, profile = get_category_policy_profile(settings.stage8_policy_profile)
+    return {
+        "profile_name": profile_name,
+        "policy_version": settings.stage8_policy_version,
+        "profile": profile_summary(profile),
+    }
+
+
+@router.get("/research/stage8/rules-field")
+def research_stage8_rules_field(
+    market_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    market = db.get(Market, market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    platform = db.get(Platform, market.platform_id)
+    _, profile = get_category_policy_profile(settings.stage8_policy_profile)
+    category_result = classify_market_category(
+        market,
+        confidence_floor=float(settings.stage8_category_confidence_floor),
+    )
+    category_policy = get_category_policy(category_result.category, profile)
+    rules = evaluate_rules_fields(
+        market,
+        platform=platform,
+        category_policy=category_policy,
+    )
+    return {
+        "market_id": market.id,
+        "category": category_result.category,
+        "category_confidence": category_result.confidence,
+        "rules_ambiguity_score": rules.ambiguity_score,
+        "resolution_source_confidence": rules.resolution_source_confidence,
+        "dispute_risk_flag": rules.dispute_risk_flag,
+        "reason_codes": rules.reason_codes,
+        "policy_thresholds": category_policy,
+    }
+
+
 @router.post("/research/stage7/shadow/track")
 def research_stage7_shadow_track(
     lookback_days: int = Query(default=14, ge=1, le=90),
@@ -2374,6 +2472,338 @@ def research_stage7_shadow_track(
         params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage7_shadow"},
         metrics=extract_stage7_shadow_metrics(report),
         tags={"provider": settings.stage7_agent_provider},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.post("/research/stage8/shadow-ledger/track")
+def research_stage8_shadow_ledger_track(
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    limit: int = Query(default=300, ge=50, le=5000),
+    run_name: str = Query(default="stage8_shadow_ledger"),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    report = build_stage8_shadow_ledger_report(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    tracking = record_stage5_experiment(
+        run_name=run_name,
+        params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_shadow_ledger"},
+        metrics=extract_stage8_shadow_ledger_metrics(report),
+        tags={"policy_profile": settings.stage8_policy_profile},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.get("/research/stage8/final-report")
+def research_stage8_final_report(
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    limit: int = Query(default=300, ge=50, le=5000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    shadow = build_stage8_shadow_ledger_report(db, settings=settings, lookback_days=lookback_days, limit=limit)
+    return build_stage8_final_report(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+        shadow_report=shadow,
+    )
+
+
+@router.post("/research/stage8/final-report/track")
+def research_stage8_final_report_track(
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    limit: int = Query(default=300, ge=50, le=5000),
+    run_name: str = Query(default="stage8_final_report"),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    shadow = build_stage8_shadow_ledger_report(db, settings=settings, lookback_days=lookback_days, limit=limit)
+    report = build_stage8_final_report(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+        shadow_report=shadow,
+    )
+    tracking = record_stage5_experiment(
+        run_name=run_name,
+        params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_final_report"},
+        metrics=extract_stage8_final_report_metrics(report),
+        tags={"final_decision": str(report.get("final_decision") or "")},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.get("/research/stage8/batch")
+def research_stage8_batch(
+    lookback_days: int = Query(default=14, ge=1, le=365),
+    limit: int = Query(default=300, ge=50, le=5000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage8_batch_report(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+
+
+@router.get("/research/stage9/consensus-quality")
+def research_stage9_consensus_quality(
+    days: int = Query(default=14, ge=1, le=180),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_stage9_consensus_quality_report(db, days=days)
+
+
+@router.get("/research/stage9/directional-labeling")
+def research_stage9_directional_labeling(
+    days: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_stage9_directional_labeling_report(db, days=days)
+
+
+@router.get("/research/stage9/execution-realism")
+def research_stage9_execution_realism(
+    days: int = Query(default=14, ge=1, le=180),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_stage9_execution_realism_report(db, days=days)
+
+
+@router.get("/research/stage9/batch")
+def research_stage9_batch(
+    days_consensus: int = Query(default=14, ge=1, le=180),
+    days_labeling: int = Query(default=30, ge=1, le=365),
+    days_execution: int = Query(default=14, ge=1, le=180),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage9_batch_report(
+        db,
+        settings=settings,
+        days_consensus=days_consensus,
+        days_labeling=days_labeling,
+        days_execution=days_execution,
+    )
+
+
+@router.get("/research/stage9/final-report")
+def research_stage9_final_report(
+    days_consensus: int = Query(default=14, ge=1, le=180),
+    days_labeling: int = Query(default=30, ge=1, le=365),
+    days_execution: int = Query(default=14, ge=1, le=180),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage9_final_report(
+        db,
+        settings=settings,
+        days_consensus=days_consensus,
+        days_labeling=days_labeling,
+        days_execution=days_execution,
+    )
+
+
+@router.post("/research/stage9/track")
+def research_stage9_track(
+    run_name: str = Query(default="stage9_source_quality"),
+    days_consensus: int = Query(default=14, ge=1, le=180),
+    days_labeling: int = Query(default=30, ge=1, le=365),
+    days_execution: int = Query(default=14, ge=1, le=180),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    report = build_stage9_batch_report(
+        db,
+        settings=settings,
+        days_consensus=days_consensus,
+        days_labeling=days_labeling,
+        days_execution=days_execution,
+    )
+    consensus = (report.get("reports") or {}).get("stage9_consensus_quality") or {}
+    labeling = (report.get("reports") or {}).get("stage9_directional_labeling") or {}
+    execution = (report.get("reports") or {}).get("stage9_execution_realism") or {}
+    tracking = record_stage5_experiment(
+        run_name=run_name,
+        params={
+            "report_type": "stage9_track",
+            "days_consensus": days_consensus,
+            "days_labeling": days_labeling,
+            "days_execution": days_execution,
+        },
+        metrics={
+            "metaculus_median_fill_rate": float(consensus.get("metaculus_median_fill_rate") or 0.0),
+            "consensus_3source_share": float(consensus.get("consensus_3source_share") or 0.0),
+            "direction_labeled_share": float(labeling.get("direction_labeled_share") or 0.0),
+            "direction_missing_label_share": float(labeling.get("direction_missing_label_share") or 0.0),
+            "non_zero_edge_share": float(execution.get("non_zero_edge_share") or 0.0),
+            "spread_coverage_share": float(execution.get("spread_coverage_share") or 0.0),
+            "open_interest_coverage_share": float(execution.get("open_interest_coverage_share") or 0.0),
+            "brier_skill_score": float(execution.get("brier_skill_score") or 0.0),
+            "ece": float(execution.get("ece") or 0.0),
+            "precision_at_25": float(execution.get("precision_at_25") or 0.0),
+            "auprc": float(execution.get("auprc") or 0.0),
+        },
+        tags={"stage": "stage9"},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.get("/research/stage10/replay")
+def research_stage10_replay(
+    days: int = Query(default=365, ge=1, le=1825),
+    limit: int = Query(default=5000, ge=100, le=50000),
+    event_target: int = Query(default=100, ge=10, le=1000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage10_replay_report(
+        db,
+        settings=settings,
+        days=days,
+        limit=limit,
+        event_target=event_target,
+        persist_rows=True,
+    )
+
+
+@router.get("/research/stage10/module-audit")
+def research_stage10_module_audit(db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    return build_stage10_module_audit_report(db, settings=settings)
+
+
+@router.get("/research/stage10/timeline-quality")
+def research_stage10_timeline_quality(
+    days: int = Query(default=365, ge=1, le=1825),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_stage10_timeline_quality_report(db, days=days)
+
+
+@router.get("/research/stage10/timeline-backfill-plan")
+def research_stage10_timeline_backfill_plan(
+    days: int = Query(default=730, ge=1, le=3650),
+    limit: int = Query(default=500, ge=50, le=50000),
+    db: Session = Depends(get_db),
+) -> dict:
+    return build_stage10_timeline_backfill_plan(db, days=days, limit=limit)
+
+
+@router.post("/research/stage10/timeline-backfill-run")
+def research_stage10_timeline_backfill_run(
+    days: int = Query(default=730, ge=1, le=3650),
+    limit: int = Query(default=500, ge=50, le=50000),
+    per_platform_limit: int = Query(default=100, ge=1, le=2000),
+    dry_run: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    report = run_stage10_timeline_backfill(
+        db,
+        settings=settings,
+        days=days,
+        limit=limit,
+        per_platform_limit=per_platform_limit,
+        dry_run=dry_run,
+    )
+    tracking = record_stage5_experiment(
+        run_name="stage10_timeline_backfill",
+        params={
+            "report_type": "stage10_timeline_backfill",
+            "days": days,
+            "limit": limit,
+            "per_platform_limit": per_platform_limit,
+            "dry_run": dry_run,
+        },
+        metrics={
+            "updated_rows": float(report.get("updated_rows") or 0.0),
+            "total_candidates": float(report.get("total_candidates") or 0.0),
+            "updated_manifold": float((report.get("updated_by_platform") or {}).get("MANIFOLD") or 0.0),
+            "updated_metaculus": float((report.get("updated_by_platform") or {}).get("METACULUS") or 0.0),
+        },
+        tags={"stage": "stage10"},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.get("/research/stage10/final-report")
+def research_stage10_final_report(
+    days: int = Query(default=365, ge=1, le=1825),
+    limit: int = Query(default=5000, ge=100, le=50000),
+    event_target: int = Query(default=100, ge=10, le=1000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage10_final_report(
+        db,
+        settings=settings,
+        days=days,
+        limit=limit,
+        event_target=event_target,
+    )
+
+
+@router.get("/research/stage10/batch")
+def research_stage10_batch(
+    days: int = Query(default=365, ge=1, le=1825),
+    limit: int = Query(default=5000, ge=100, le=50000),
+    event_target: int = Query(default=100, ge=10, le=1000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    return build_stage10_batch_report(
+        db,
+        settings=settings,
+        days=days,
+        limit=limit,
+        event_target=event_target,
+    )
+
+
+@router.post("/research/stage10/track")
+def research_stage10_track(
+    run_name: str = Query(default="stage10_replay_and_security"),
+    days: int = Query(default=365, ge=1, le=1825),
+    limit: int = Query(default=5000, ge=100, le=50000),
+    event_target: int = Query(default=100, ge=10, le=1000),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    report = build_stage10_batch_report(
+        db,
+        settings=settings,
+        days=days,
+        limit=limit,
+        event_target=event_target,
+    )
+    replay = (report.get("reports") or {}).get("stage10_replay") or {}
+    audit = (report.get("reports") or {}).get("stage10_module_audit") or {}
+    final = (report.get("reports") or {}).get("stage10_final_report") or {}
+    tracking = record_stage5_experiment(
+        run_name=run_name,
+        params={
+            "report_type": "stage10_track",
+            "days": days,
+            "limit": limit,
+            "event_target": event_target,
+        },
+        metrics={
+            **extract_stage10_replay_metrics(replay),
+            **extract_stage10_module_audit_metrics(audit),
+            **extract_stage10_final_report_metrics(final),
+        },
+        tags={"stage": "stage10"},
     )
     return {"report": report, "tracking": tracking}
 

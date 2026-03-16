@@ -91,6 +91,47 @@ from app.services.research.stage7_shadow import (
     build_stage7_shadow_report,
     extract_stage7_shadow_metrics,
 )
+from app.services.research.stage8_shadow_ledger import (
+    build_stage8_shadow_ledger_report,
+    extract_stage8_shadow_ledger_metrics,
+)
+from app.services.research.stage8_final_report import (
+    build_stage8_final_report,
+    extract_stage8_final_report_metrics,
+)
+from app.services.research.stage8_batch import build_stage8_batch_report
+from app.services.research.stage9_batch import build_stage9_batch_report
+from app.services.research.stage9_final_report import (
+    build_stage9_final_report,
+    extract_stage9_final_report_metrics,
+)
+from app.services.research.stage10_batch import build_stage10_batch_report
+from app.services.research.stage10_final_report import (
+    build_stage10_final_report,
+    extract_stage10_final_report_metrics,
+)
+from app.services.research.stage10_module_audit import (
+    build_stage10_module_audit_report,
+    extract_stage10_module_audit_metrics,
+)
+from app.services.research.stage10_replay import (
+    build_stage10_replay_report,
+    extract_stage10_replay_metrics,
+)
+from app.services.research.stage10_timeline_quality import (
+    build_stage10_timeline_quality_report,
+    extract_stage10_timeline_quality_metrics,
+)
+from app.services.research.stage10_timeline_backfill import (
+    build_stage10_timeline_backfill_plan,
+    extract_stage10_timeline_backfill_metrics,
+)
+from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
+from app.services.research.stage9_reports import (
+    build_stage9_consensus_quality_report,
+    build_stage9_directional_labeling_report,
+    build_stage9_execution_realism_report,
+)
 from app.services.research.stage7_final_report import (
     build_stage7_final_report,
     extract_stage7_final_report_metrics,
@@ -157,6 +198,29 @@ __all__ = [
     "extract_stage7_harness_metrics",
     "build_stage7_shadow_report",
     "extract_stage7_shadow_metrics",
+    "build_stage8_shadow_ledger_report",
+    "extract_stage8_shadow_ledger_metrics",
+    "build_stage8_final_report",
+    "extract_stage8_final_report_metrics",
+    "build_stage8_batch_report",
+    "build_stage9_batch_report",
+    "build_stage9_final_report",
+    "build_stage9_consensus_quality_report",
+    "build_stage9_directional_labeling_report",
+    "build_stage9_execution_realism_report",
+    "extract_stage9_final_report_metrics",
+    "build_stage10_batch_report",
+    "build_stage10_final_report",
+    "extract_stage10_final_report_metrics",
+    "build_stage10_module_audit_report",
+    "extract_stage10_module_audit_metrics",
+    "build_stage10_replay_report",
+    "extract_stage10_replay_metrics",
+    "build_stage10_timeline_quality_report",
+    "extract_stage10_timeline_quality_metrics",
+    "build_stage10_timeline_backfill_plan",
+    "extract_stage10_timeline_backfill_metrics",
+    "run_stage10_timeline_backfill",
     "build_stage7_final_report",
     "extract_stage7_final_report_metrics",
     "get_ab_variant_for_user",

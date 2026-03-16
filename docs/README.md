@@ -565,6 +565,21 @@ env DATABASE_URL=sqlite:///artifacts/research/stage5_xplat3.db .venv/bin/python 
 8. `RESEARCH_AB_CONTROL_SHARE`
 9. `RESEARCH_ETHICS_DISCLAIMER_TEXT`
 
+## 15.5 Client Trading Expansion (UA-first)
+
+1. Для клієнтського rollout з execution-режимом зафіксована окрема платформа-матриця:
+   - `docs/CLIENT_TRADING_PLATFORM_MATRIX.md`
+2. Базова стратегія:
+   - execution на `Polymarket CLOB`,
+   - аналітичні anchors: `Metaculus + Manifold`,
+   - regulated venues (`Kalshi/Smarkets/Betfair`) підключати лише після compliance check.
+3. Platform availability має керуватись feature flags:
+   - `execution_enabled_<platform>=true/false`
+   - недоступний venue => `SHADOW_ONLY`/`DATA_ONLY`, без зупинки всього пайплайна.
+4. Глобальна стратегія еволюції продукту:
+   - `docs/GLOBAL_STRATEGY_EVENT_TRADING_ROADMAP.md`
+   - (3 сходинки: event replay -> full trading service -> multi-source expansion).
+
 ## 16. Troubleshooting
 
 1. Проблема: `DATABASE_URL` на `db` не резолвиться локально.

@@ -48,6 +48,24 @@ class MarketRepository:
         market.rules_text = dto.rules_text
         market.source_payload = dto.source_payload
         market.fetched_at = datetime.now(UTC)
+        payload = dto.source_payload or {}
+        spread_cents = payload.get("spread_cents") or payload.get("spreadCents")
+        best_bid = payload.get("best_bid_yes") or payload.get("bestBidYes") or payload.get("yes_bid")
+        best_ask = payload.get("best_ask_yes") or payload.get("bestAskYes") or payload.get("yes_ask")
+        open_interest = payload.get("open_interest") or payload.get("openInterest") or payload.get("open_interest_fp")
+        notional = payload.get("notional_value_dollars") or payload.get("notionalValueDollars")
+        prev_yes_bid = payload.get("previous_yes_bid") or payload.get("previous_yes_bid_dollars")
+        execution_source = payload.get("execution_source")
+        is_neg_risk = payload.get("neg_risk")
+
+        market.spread_cents = float(spread_cents) if isinstance(spread_cents, (int, float)) else None
+        market.best_bid_yes = float(best_bid) if isinstance(best_bid, (int, float)) else None
+        market.best_ask_yes = float(best_ask) if isinstance(best_ask, (int, float)) else None
+        market.open_interest = float(open_interest) if isinstance(open_interest, (int, float)) else None
+        market.notional_value_dollars = float(notional) if isinstance(notional, (int, float)) else None
+        market.previous_yes_bid = float(prev_yes_bid) if isinstance(prev_yes_bid, (int, float)) else None
+        market.execution_source = str(execution_source)[:32] if execution_source is not None else None
+        market.is_neg_risk = bool(is_neg_risk) if isinstance(is_neg_risk, bool) else None
 
         self.db.flush()
         self.db.add(
