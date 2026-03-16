@@ -834,18 +834,24 @@ def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -
         return {"status": "error", "error": str(exc)}
 
 
-def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str) -> dict:
+def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, batch_size: int = 2000) -> dict:
     job = _start_job(db, f"label_signal_history_{minutes}m")
     try:
         now = datetime.now(UTC)
         target = now - timedelta(minutes=minutes)
+        # Only look back 7 days — older rows will never get a matching snapshot
+        lookback_cutoff = now - timedelta(days=7)
         tolerance = max(1, int(get_settings().signal_labeling_tolerance_minutes))
 
         rows = list(
             db.scalars(
                 select(SignalHistory)
-                .where(SignalHistory.timestamp <= target)
+                .where(
+                    SignalHistory.timestamp >= lookback_cutoff,
+                    SignalHistory.timestamp <= target,
+                )
                 .order_by(SignalHistory.timestamp.asc())
+                .limit(batch_size)
             )
         )
 
