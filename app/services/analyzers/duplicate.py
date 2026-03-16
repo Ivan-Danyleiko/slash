@@ -488,3 +488,90 @@ class DuplicateDetector:
                     )
                     pairs.append((a, b, float(sim), explanation))
         return pairs
+
+    def find_pairs_against(
+        self,
+        anchors: list[Market],
+        candidates: list[Market],
+        threshold: float,
+        *,
+        max_pairs: int = 20000,
+    ) -> list[tuple[Market, Market, float, str]]:
+        """
+        Incremental variant: compare only anchor markets against candidate universe.
+        """
+        pairs: list[tuple[Market, Market, float, str]] = []
+        all_markets = {m.id: m for m in [*anchors, *candidates]}
+        normalized = {m_id: self._canonical_text(m.title) for m_id, m in all_markets.items()}
+        compact = {m_id: self._compact_title(m.title) for m_id, m in all_markets.items()}
+        tokens = {m_id: self._meaningful_tokens(m.title) for m_id, m in all_markets.items()}
+        doc_freq: dict[str, int] = {}
+        total_docs = max(1, len(all_markets))
+        for token_set in tokens.values():
+            for token in token_set:
+                doc_freq[token] = doc_freq.get(token, 0) + 1
+        idf = {token: log((1 + total_docs) / (1 + freq)) + 1 for token, freq in doc_freq.items()}
+
+        seen: set[tuple[int, int]] = set()
+        for a in anchors:
+            for b in candidates:
+                if a.id == b.id:
+                    continue
+                lo, hi = (a.id, b.id) if a.id < b.id else (b.id, a.id)
+                key = (lo, hi)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if len(pairs) >= max_pairs:
+                    return pairs
+                if not self._comparable(a, b):
+                    continue
+                overlap_tokens = tokens[a.id] & tokens[b.id]
+                overlap = len(overlap_tokens)
+                if overlap < self.min_overlap:
+                    if self.profile == "aggressive":
+                        fallback_sim = max(
+                            ratio(compact[a.id], compact[b.id]),
+                            token_set_ratio(compact[a.id], compact[b.id]),
+                        )
+                        if fallback_sim >= self.broad_relaxed_fuzzy_min:
+                            pairs.append(
+                                (
+                                    all_markets[lo],
+                                    all_markets[hi],
+                                    float(fallback_sim),
+                                    f"aggressive relaxed fuzzy fallback; compact_similarity={fallback_sim:.1f}",
+                                )
+                            )
+                    continue
+                union = tokens[a.id] | tokens[b.id]
+                jaccard = overlap / max(1, len(union))
+                weighted_overlap = sum(idf.get(tok, 1.0) for tok in overlap_tokens)
+                has_anchor = any(
+                    idf.get(tok, 1.0) >= self.anchor_idf and tok not in self.GENERIC_TOPIC_WORDS
+                    for tok in overlap_tokens
+                )
+                if weighted_overlap < self.min_weighted_overlap and jaccard < self.min_jaccard:
+                    continue
+                geo_a = tokens[a.id] & self.GEO_WORDS
+                geo_b = tokens[b.id] & self.GEO_WORDS
+                if self.profile != "aggressive" and geo_a and geo_b and not (geo_a & geo_b):
+                    continue
+                if self.profile != "aggressive" and not has_anchor and jaccard < (self.min_jaccard + 0.1):
+                    continue
+                sim = max(
+                    ratio(normalized[a.id], normalized[b.id]),
+                    ratio(compact[a.id], compact[b.id]),
+                    token_set_ratio(normalized[a.id], normalized[b.id]),
+                    token_set_ratio(compact[a.id], compact[b.id]),
+                )
+                if sim < threshold:
+                    continue
+                explanation = (
+                    "title fuzzy match; "
+                    f"shared_meaningful_tokens={overlap}; "
+                    f"jaccard={jaccard:.2f}; "
+                    f"weighted_overlap={weighted_overlap:.2f}"
+                )
+                pairs.append((all_markets[lo], all_markets[hi], float(sim), explanation))
+        return pairs

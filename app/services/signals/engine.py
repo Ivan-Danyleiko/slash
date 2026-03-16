@@ -40,6 +40,32 @@ class SignalEngine:
         self.execution = build_execution_simulator(db=db, settings=self.settings)
 
     def detect_duplicates(self) -> dict[str, int]:
+        now = datetime.now(UTC)
+        incremental_hours = max(1, int(getattr(self.settings, "signal_duplicate_incremental_hours", 6)))
+        max_anchor_markets = max(50, int(getattr(self.settings, "signal_duplicate_max_anchor_markets", 800)))
+        max_broad_pairs = max(1000, int(getattr(self.settings, "signal_duplicate_max_pairs_per_run", 20000)))
+        cutoff = now - timedelta(hours=incremental_hours)
+
+        anchor_markets = list(
+            self.db.scalars(
+                select(Market)
+                .where(Market.fetched_at >= cutoff)
+                .order_by(Market.fetched_at.desc())
+                .limit(max_anchor_markets)
+            )
+        )
+        if not anchor_markets:
+            return {
+                "duplicate_pairs": 0,
+                "duplicate_pairs_broad": 0,
+                "duplicate_pairs_strict_pass": 0,
+                "duplicate_pairs_strict_fail": 0,
+                "duplicate_pairs_shadow_balanced_pass": 0,
+                "duplicate_pairs_shadow_aggressive_pass": 0,
+                "mode": "incremental",
+                "anchors_processed": 0,
+                "candidates_processed": 0,
+            }
         markets = list(self.db.scalars(select(Market)))
         strict_detector = DuplicateDetector.with_profile(profile="strict")
         balanced_detector = DuplicateDetector.with_profile(profile="balanced")
@@ -50,10 +76,24 @@ class SignalEngine:
         broad_detector.min_jaccard = self.settings.signal_duplicate_broad_min_jaccard
         broad_detector.min_weighted_overlap = self.settings.signal_duplicate_broad_min_weighted_overlap
         broad_detector.anchor_idf = 0.0
-        broad_pairs = broad_detector.find_pairs(markets, self.settings.signal_duplicate_broad_threshold)
+        broad_pairs = broad_detector.find_pairs_against(
+            anchor_markets,
+            markets,
+            self.settings.signal_duplicate_broad_threshold,
+            max_pairs=max_broad_pairs,
+        )
 
-        self.db.execute(delete(DuplicateMarketPair))
-        self.db.execute(delete(DuplicatePairCandidate))
+        anchor_ids = [m.id for m in anchor_markets]
+        self.db.execute(
+            delete(DuplicateMarketPair).where(
+                or_(DuplicateMarketPair.market_a_id.in_(anchor_ids), DuplicateMarketPair.market_b_id.in_(anchor_ids))
+            )
+        )
+        self.db.execute(
+            delete(DuplicatePairCandidate).where(
+                or_(DuplicatePairCandidate.market_a_id.in_(anchor_ids), DuplicatePairCandidate.market_b_id.in_(anchor_ids))
+            )
+        )
 
         inserted = 0
         strict_fail = 0
@@ -110,6 +150,10 @@ class SignalEngine:
             "duplicate_pairs_strict_fail": strict_fail,
             "duplicate_pairs_shadow_balanced_pass": shadow_balanced_pass,
             "duplicate_pairs_shadow_aggressive_pass": shadow_aggressive_pass,
+            "mode": "incremental",
+            "anchors_processed": len(anchor_markets),
+            "candidates_processed": len(markets),
+            "cutoff": cutoff.isoformat(),
         }
 
     def analyze_rules(self) -> dict[str, int]:
