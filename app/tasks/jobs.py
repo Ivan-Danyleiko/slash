@@ -79,12 +79,34 @@ def analyze_markets_job(db: Session) -> dict:
 
 
 def detect_duplicates_job(db: Session) -> dict:
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(minutes=45)
+    stale_rows = list(
+        db.scalars(
+            select(JobRun).where(
+                JobRun.job_name == "detect_duplicates",
+                JobRun.status == "RUNNING",
+                JobRun.started_at < stale_before,
+            )
+        )
+    )
+    for stale in stale_rows:
+        stale.status = "FAILED"
+        stale.finished_at = now
+        stale.details = {
+            "error": "stale_timeout",
+            "note": "auto-closed by detect_duplicates guard",
+        }
+    if stale_rows:
+        db.commit()
+
     running_exists = db.scalar(
         select(func.count())
         .select_from(JobRun)
         .where(
             JobRun.job_name == "detect_duplicates",
             JobRun.status == "RUNNING",
+            JobRun.started_at >= stale_before,
         )
     )
     if int(running_exists or 0) > 0:
