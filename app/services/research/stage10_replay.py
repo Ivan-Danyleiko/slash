@@ -198,19 +198,41 @@ def _normalize_core_category(raw: Any, *, title: str = "") -> str:
     }:
         return "politics"
 
-    # Keyword search in merged (category + title)
-    if any(k in merged for k in ("btc", "eth", "sol", "xrp", "crypto", "token", "coin", "defi", "nft", "blockchain")):
+    # Keyword search in merged (category + title).
+    # Note: "bitcoin" contains "bit" (irrelevant) but also use full-word checks for common names.
+    if any(k in merged for k in (
+        "btc", "eth", "sol", "xrp", "avax", "bnb", "ada", "doge",
+        "crypto", "token", "coin", "defi", "nft", "blockchain",
+        "bitcoin", "ethereum", "solana", "binance", "polygon", "chainlink",
+        "altcoin", "stablecoin", "celsius", "ftx", "coinbase",
+    )):
         return "crypto"
-    if any(k in merged for k in ("stock", "gdp", "cpi", "fed", "interest rate", "econom", "finance", "market cap",
-                                  "s&p", "nasdaq", "dow", "hedge", "ipo", "revenue", "inflation")):
+    if any(k in merged for k in (
+        "stock", "gdp", "cpi", "fed", "interest rate", "econom", "finance",
+        "market cap", "s&p", "nasdaq", "dow jones", "dow", "hedge",
+        "ipo", "revenue", "inflation", "treasury", "yield", "bond",
+        "recession", "earnings", "commodity", "oil price", "gold price",
+    )):
         return "finance"
-    if any(k in merged for k in ("sport", "nba", "nfl", "mlb", "nhl", "soccer", "football", "match",
-                                  "tournament", "olympic", "tennis", "championship", "league", "fifa",
-                                  "mma", "boxing", "ufc")):
+    if any(k in merged for k in (
+        "sport", "nba", "nfl", "mlb", "nhl", "soccer", "football",
+        "match", "tournament", "olympic", "tennis", "championship",
+        "league", "fifa", "mma", "boxing", "ufc", "f1", "formula 1",
+        "basketball", "baseball", "hockey", "cricket", "rugby",
+        "premier league", "epl", "la liga", "bundesliga", "serie a",
+        "golf", "pga", "wimbledon", "super bowl", "world cup",
+        "lakers", "celtics", "yankees", "patriots", "warriors",
+    )):
         return "sports"
-    if any(k in merged for k in ("elect", "president", "senate", "congress", "government", "politic", "policy",
-                                  "vote", "ballot", "democrat", "republican", "prime minister", "parliament",
-                                  "geopolit", "war", "nato", "ukraine", "russia")):
+    if any(k in merged for k in (
+        "elect", "president", "senate", "congress", "government",
+        "politic", "policy", "vote", "ballot", "democrat", "republican",
+        "prime minister", "parliament", "geopolit", "war", "nato",
+        "ukraine", "russia", "china", "taiwan", "iran", "israel",
+        "white house", "supreme court", "un ", "united nations",
+        "trump", "biden", "harris", "macron", "xi jinping",
+        "sanction", "ceasefire", "treaty", "diplomat",
+    )):
         return "politics"
     return "other"
 
@@ -409,11 +431,16 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 stress_costs = spread + fee + size_penalty
                 vals: list[float] = []
                 for row in keep_rows:
+                    # Scenario sweeps use the normalized edge proxy, not the raw asymmetric
+                    # payoff.  The sweep is a policy stress-test: "if we bet this edge under
+                    # these costs, do we profit?"  Raw prediction-market payoffs vary wildly
+                    # with price level and obscure the policy comparison.
+                    edge = _row_effective_edge(row)
                     resolved = row.get("resolved_success_direction_aware")
                     if resolved is None:
-                        realized = _row_effective_edge(row)
+                        realized = edge
                     else:
-                        realized = _prediction_market_return(row, won=bool(resolved))
+                        realized = edge if bool(resolved) else -abs(edge)
                     vals.append(realized - stress_costs)
                 mean_ret = (sum(vals) / len(vals)) if vals else -stress_costs
                 ok = mean_ret > 0.0
