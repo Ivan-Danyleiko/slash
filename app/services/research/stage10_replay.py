@@ -215,11 +215,43 @@ def _normalize_core_category(raw: Any, *, title: str = "") -> str:
     return "other"
 
 
+def _normalize_signal_type(raw: Any) -> str:
+    val = str(raw or "").strip().upper()
+    if not val:
+        return ""
+    if "." in val:
+        val = val.split(".")[-1]
+    return val
+
+
+def _fallback_edge_proxy(row: dict[str, Any]) -> float:
+    features = dict(row.get("features_snapshot") or {})
+    divergence = _safe_float(features.get("divergence"))
+    if divergence is not None and divergence > 0:
+        # Conservative assumption: ~50% of the divergence gap converges.
+        return float(divergence * 0.5)
+    p_t = _safe_float(features.get("probability_t"))
+    if p_t is not None:
+        # If we only have point probability, use distance-from-50% as a weak proxy.
+        # Capped to avoid over-optimistic historical sweeps.
+        return float(min(0.20, abs(p_t - 0.5) * 0.5))
+    return 0.0
+
+
+def _row_effective_edge(row: dict[str, Any]) -> float:
+    edge = float(row.get("predicted_edge_after_costs_pct") or 0.0)
+    if edge != 0.0:
+        return edge
+    return _fallback_edge_proxy(row)
+
+
 def _infer_signal_direction(history_row: Any, signal: Signal | None) -> str | None:
     explicit = str(_hget(history_row, "signal_direction") or "").strip().upper()
     if explicit in {"YES", "NO"}:
         return explicit
-    signal_type = str(_hget(history_row, "signal_type") or (signal.signal_type if signal is not None else "")).strip().upper()
+    signal_type = _normalize_signal_type(
+        _hget(history_row, "signal_type") or (signal.signal_type if signal is not None else ""),
+    )
     if signal_type == "RULES_RISK":
         return "NO"
     if signal_type == "DIVERGENCE":
@@ -227,6 +259,10 @@ def _infer_signal_direction(history_row: Any, signal: Signal | None) -> str | No
         related = _safe_float(_hget(history_row, "related_market_probability"))
         if p0 is not None and related is not None:
             return "YES" if p0 < related else "NO"
+    if signal_type in {"ARBITRAGE_CANDIDATE", "DUPLICATE_MARKET"}:
+        p0 = _safe_float(_hget(history_row, "probability_at_signal"))
+        if p0 is not None:
+            return "YES" if p0 < 0.5 else "NO"
     return None
 
 
@@ -341,11 +377,7 @@ def _scenario_sweeps(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 stress_costs = spread + fee + size_penalty
                 vals: list[float] = []
                 for row in keep_rows:
-                    edge = float(row.get("predicted_edge_after_costs_pct") or 0.0)
-                    if edge == 0.0:
-                        # No execution analysis: use half of the divergence score as a rough
-                        # edge estimate (assumes market converges ~50% of the divergence gap).
-                        edge = float((row.get("features_snapshot") or {}).get("divergence") or 0.0) * 0.5
+                    edge = _row_effective_edge(row)
                     resolved = row.get("resolved_success_direction_aware")
                     if resolved is None:
                         realized = edge
@@ -607,18 +639,6 @@ def build_stage10_replay_report(
         for r in rows
         if r.get("resolved_success_direction_aware") is not None and str(r.get("resolved_outcome") or "").upper() != "VOID"
     ]
-    def _row_effective_edge(r: dict[str, Any]) -> float:
-        """Return the best available edge estimate for a row.
-
-        If the signal went through the full execution pipeline, use the stored
-        predicted_edge_after_costs_pct.  Otherwise fall back to half the divergence
-        score as a rough proxy (assumes markets converge ~50% of the gap on average).
-        """
-        edge = float(r.get("predicted_edge_after_costs_pct") or 0.0)
-        if edge == 0.0:
-            edge = float((r.get("features_snapshot") or {}).get("divergence") or 0.0) * 0.5
-        return edge
-
     post_cost_returns = [
         _row_effective_edge(r)
         if bool(r.get("resolved_success_direction_aware"))
