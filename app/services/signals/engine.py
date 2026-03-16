@@ -623,8 +623,9 @@ class SignalEngine:
         }
 
     def run(self) -> dict[str, int]:
+        # detect_duplicates() is O(N²) across all markets — runs via its own
+        # scheduled task every 2 hours. run() reads the pre-computed pairs from DB.
         result: dict[str, int] = {}
-        result.update(self.detect_duplicates())
         result.update(self.analyze_rules())
         result.update(self.detect_divergence())
         result.update(self.capture_divergence_research_samples())
