@@ -666,9 +666,12 @@ class SignalEngine:
             row.market_id: row.score for row in self.db.scalars(select(LiquidityAnalysis))
         }
         platform_by_id = {p.id: p.name for p in self.db.scalars(select(Platform))}
+        snap_cutoff_research = datetime.now(UTC) - timedelta(days=7)
         latest_snapshot_prob_by_market: dict[int, float] = {}
         for snap in self.db.scalars(
-            select(MarketSnapshot).order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.fetched_at.desc())
+            select(MarketSnapshot)
+            .where(MarketSnapshot.fetched_at >= snap_cutoff_research)
+            .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.fetched_at.desc())
         ):
             if snap.market_id in latest_snapshot_prob_by_market:
                 continue
@@ -917,10 +920,13 @@ class SignalEngine:
                 continue
             tokenized.append((market, tokens))
 
-        buckets: dict[str, list[tuple[Market, set[str]]]] = {}
+        # Build per-platform buckets — we only want cross-platform pairs, so
+        # skip intra-platform combinations upfront instead of after comparison.
+        buckets_by_platform: dict[str, dict[int, list[tuple[Market, set[str]]]]] = {}
         for market, tokens in tokenized:
             for token in list(tokens)[:6]:
-                buckets.setdefault(token, []).append((market, tokens))
+                by_plat = buckets_by_platform.setdefault(token, {})
+                by_plat.setdefault(market.platform_id, []).append((market, tokens))
 
         seen_pairs: set[tuple[int, int]] = set()
         candidates = 0
@@ -934,111 +940,113 @@ class SignalEngine:
         skipped_too_large_diff = 0
         min_shared_tokens = max(1, int(self.settings.signal_divergence_research_fallback_min_shared_tokens))
         min_jaccard = max(0.0, float(self.settings.signal_divergence_research_fallback_min_jaccard))
-        for items in buckets.values():
-            if len(items) < 2:
+        for token, by_plat in buckets_by_platform.items():
+            platform_ids = list(by_plat.keys())
+            if len(platform_ids) < 2:
+                # All markets for this token are on the same platform — nothing to pair.
+                skipped_same_platform += sum(
+                    len(v) * (len(v) - 1) // 2 for v in by_plat.values() if len(v) >= 2
+                )
                 continue
-            if len(items) > 80:
-                items = items[:80]
-            for i in range(len(items)):
-                for j in range(i + 1, len(items)):
-                    market_a, tokens_a = items[i]
-                    market_b, tokens_b = items[j]
-                    pair_key = tuple(sorted((market_a.id, market_b.id)))
-                    if pair_key in seen_pairs:
-                        continue
-                    seen_pairs.add(pair_key)
-                    if market_a.platform_id == market_b.platform_id:
-                        skipped_same_platform += 1
-                        continue
-                    shared_tokens = len(tokens_a & tokens_b)
-                    if shared_tokens < min_shared_tokens:
-                        continue
-                    union = len(tokens_a | tokens_b) or 1
-                    jaccard = shared_tokens / union
-                    if jaccard < min_jaccard:
-                        continue
-                    prob_a = float(market_a.probability_yes or 0.0)
-                    prob_b = float(market_b.probability_yes or 0.0)
-                    if prob_a < min_prob or prob_a > max_prob or prob_b < min_prob or prob_b > max_prob:
-                        skipped_prob_bounds += 1
-                        continue
-                    pair_liquidity = min(
-                        liquidity_by_market.get(market_a.id, 0.0) or 0.0,
-                        liquidity_by_market.get(market_b.id, 0.0) or 0.0,
-                    )
-                    if pair_liquidity < min_pair_liquidity:
-                        skipped_low_pair_liquidity += 1
-                        continue
-                    pair_volume = min(float(market_a.volume_24h or 0.0), float(market_b.volume_24h or 0.0))
-                    if pair_volume < min_volume_24h:
-                        skipped_low_volume += 1
-                        continue
-                    divergence = abs(prob_a - prob_b)
-                    if divergence < min_diff:
-                        skipped_low_diff += 1
-                        continue
-                    if divergence > max_diff:
-                        skipped_too_large_diff += 1
-                        continue
-                    candidates += 1
-                    existing = self.db.scalar(
-                        select(SignalHistory.id).where(
-                            SignalHistory.signal_type == SignalType.DIVERGENCE,
-                            SignalHistory.timestamp >= cooldown_cutoff,
-                            or_(
-                                and_(
-                                    SignalHistory.market_id == market_a.id,
-                                    SignalHistory.related_market_id == market_b.id,
-                                ),
-                                and_(
-                                    SignalHistory.market_id == market_b.id,
-                                    SignalHistory.related_market_id == market_a.id,
-                                ),
-                            ),
-                        )
-                    )
-                    if existing:
-                        skipped_cooldown += 1
-                        continue
-
-                    platform_a = platform_by_id.get(market_a.platform_id, f"platform_{market_a.platform_id}")
-                    platform_b = platform_by_id.get(market_b.platform_id, f"platform_{market_b.platform_id}")
-                    self.db.add(
-                SignalHistory(
-                    signal_id=None,
-                    signal_type=SignalType.DIVERGENCE,
-                    timestamp=now,
-                    timestamp_bucket=self._to_hour_bucket(now),
-                    platform=f"{platform_a}|{platform_b}"[:64],
-                    source_tag="local",
-                    market_id=market_a.id,
-                    related_market_id=market_b.id,
-                            probability_at_signal=prob_a,
-                            related_market_probability=prob_b,
-                            divergence=divergence,
-                            signal_direction="YES" if float(prob_a) < float(prob_b) else "NO",
-                            liquidity=pair_liquidity,
-                            volume_24h=pair_volume,
-                            simulated_trade={
-                                "source": "cross_platform_title_overlap",
-                                "shared_tokens": shared_tokens,
-                                "token_jaccard": round(jaccard, 4),
-                            },
-                        )
-                    )
-                    created += 1
-                    if created >= max_samples:
-                        return {
-                            "candidates": candidates,
-                            "created": created,
-                            "skipped_cooldown": skipped_cooldown,
-                            "skipped_low_diff": skipped_low_diff,
-                            "skipped_same_platform": skipped_same_platform,
-                            "skipped_low_volume": skipped_low_volume,
-                            "skipped_low_pair_liquidity": skipped_low_pair_liquidity,
-                            "skipped_prob_bounds": skipped_prob_bounds,
-                            "skipped_too_large_diff": skipped_too_large_diff,
-                        }
+            # Only generate cross-platform pairs — same-platform divergence is not meaningful.
+            for pi in range(len(platform_ids)):
+                for pj in range(pi + 1, len(platform_ids)):
+                    items_a = by_plat[platform_ids[pi]][:80]
+                    items_b = by_plat[platform_ids[pj]][:80]
+                    for market_a, tokens_a in items_a:
+                        for market_b, tokens_b in items_b:
+                            pair_key = tuple(sorted((market_a.id, market_b.id)))
+                            if pair_key in seen_pairs:
+                                continue
+                            seen_pairs.add(pair_key)
+                            shared_tokens = len(tokens_a & tokens_b)
+                            if shared_tokens < min_shared_tokens:
+                                continue
+                            union = len(tokens_a | tokens_b) or 1
+                            jaccard = shared_tokens / union
+                            if jaccard < min_jaccard:
+                                continue
+                            prob_a = float(market_a.probability_yes or 0.0)
+                            prob_b = float(market_b.probability_yes or 0.0)
+                            if prob_a < min_prob or prob_a > max_prob or prob_b < min_prob or prob_b > max_prob:
+                                skipped_prob_bounds += 1
+                                continue
+                            pair_liquidity = min(
+                                liquidity_by_market.get(market_a.id, 0.0) or 0.0,
+                                liquidity_by_market.get(market_b.id, 0.0) or 0.0,
+                            )
+                            if pair_liquidity < min_pair_liquidity:
+                                skipped_low_pair_liquidity += 1
+                                continue
+                            pair_volume = min(float(market_a.volume_24h or 0.0), float(market_b.volume_24h or 0.0))
+                            if pair_volume < min_volume_24h:
+                                skipped_low_volume += 1
+                                continue
+                            divergence = abs(prob_a - prob_b)
+                            if divergence < min_diff:
+                                skipped_low_diff += 1
+                                continue
+                            if divergence > max_diff:
+                                skipped_too_large_diff += 1
+                                continue
+                            candidates += 1
+                            existing = self.db.scalar(
+                                select(SignalHistory.id).where(
+                                    SignalHistory.signal_type == SignalType.DIVERGENCE,
+                                    SignalHistory.timestamp >= cooldown_cutoff,
+                                    or_(
+                                        and_(
+                                            SignalHistory.market_id == market_a.id,
+                                            SignalHistory.related_market_id == market_b.id,
+                                        ),
+                                        and_(
+                                            SignalHistory.market_id == market_b.id,
+                                            SignalHistory.related_market_id == market_a.id,
+                                        ),
+                                    ),
+                                )
+                            )
+                            if existing:
+                                skipped_cooldown += 1
+                                continue
+                            platform_a = platform_by_id.get(market_a.platform_id, f"platform_{market_a.platform_id}")
+                            platform_b = platform_by_id.get(market_b.platform_id, f"platform_{market_b.platform_id}")
+                            self.db.add(
+                                SignalHistory(
+                                    signal_id=None,
+                                    signal_type=SignalType.DIVERGENCE,
+                                    timestamp=now,
+                                    timestamp_bucket=self._to_hour_bucket(now),
+                                    platform=f"{platform_a}|{platform_b}"[:64],
+                                    source_tag="local",
+                                    market_id=market_a.id,
+                                    related_market_id=market_b.id,
+                                    probability_at_signal=prob_a,
+                                    related_market_probability=prob_b,
+                                    divergence=divergence,
+                                    signal_direction="YES" if float(prob_a) < float(prob_b) else "NO",
+                                    liquidity=pair_liquidity,
+                                    volume_24h=pair_volume,
+                                    simulated_trade={
+                                        "source": "cross_platform_title_overlap",
+                                        "shared_tokens": shared_tokens,
+                                        "token_jaccard": round(jaccard, 4),
+                                    },
+                                )
+                            )
+                            created += 1
+                            if created >= max_samples:
+                                return {
+                                    "candidates": candidates,
+                                    "created": created,
+                                    "skipped_cooldown": skipped_cooldown,
+                                    "skipped_low_diff": skipped_low_diff,
+                                    "skipped_same_platform": skipped_same_platform,
+                                    "skipped_low_volume": skipped_low_volume,
+                                    "skipped_low_pair_liquidity": skipped_low_pair_liquidity,
+                                    "skipped_prob_bounds": skipped_prob_bounds,
+                                    "skipped_too_large_diff": skipped_too_large_diff,
+                                }
 
         return {
             "candidates": candidates,
