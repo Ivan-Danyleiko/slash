@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -224,12 +225,19 @@ def run_stage10_timeline_backfill(
     for platform in ("MANIFOLD", "METACULUS"):
         rows = list(candidates.get(platform) or [])[: max(1, int(per_platform_limit))]
         platform_unreachable = False
+        delay_seconds = (
+            float(settings.stage10_backfill_metaculus_delay_seconds)
+            if platform == "METACULUS"
+            else float(settings.stage10_backfill_manifold_delay_seconds)
+        )
         for row in rows:
             if platform_unreachable:
                 reason_counts[f"{platform.lower()}_platform_unreachable_break"] = (
                     reason_counts.get(f"{platform.lower()}_platform_unreachable_break", 0) + 1
                 )
                 break
+            if attempted_by_platform.get(platform, 0) > 0 and delay_seconds > 0:
+                time.sleep(delay_seconds)
             total_candidates += 1
             market_id = int(row.get("market_id") or 0)
             if market_id <= 0:
@@ -280,6 +288,10 @@ def run_stage10_timeline_backfill(
         "generated_at": datetime.now(UTC).isoformat(),
         "dry_run": bool(dry_run),
         "window_days": int(days),
+        "throttle_seconds": {
+            "MANIFOLD": float(settings.stage10_backfill_manifold_delay_seconds),
+            "METACULUS": float(settings.stage10_backfill_metaculus_delay_seconds),
+        },
         "plan_markets_scanned": int(plan.get("markets_scanned") or 0),
         "total_candidates": total_candidates,
         "attempted_by_platform": attempted_by_platform,

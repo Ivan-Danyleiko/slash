@@ -210,6 +210,14 @@ class Settings(BaseSettings):
     )
     stage10_replay_embargo_seconds: int = Field(default=3600, alias="STAGE10_REPLAY_EMBARGO_SECONDS")
     stage10_llm_budget_usd_monthly: float = Field(default=100.0, alias="STAGE10_LLM_BUDGET_USD_MONTHLY")
+    stage10_backfill_metaculus_delay_seconds: float = Field(
+        default=2.0,
+        alias="STAGE10_BACKFILL_METACULUS_DELAY_SECONDS",
+    )
+    stage10_backfill_manifold_delay_seconds: float = Field(
+        default=0.3,
+        alias="STAGE10_BACKFILL_MANIFOLD_DELAY_SECONDS",
+    )
     stage7_openai_api_base_url: str = Field(
         default="https://api.openai.com/v1",
         alias="STAGE7_OPENAI_API_BASE_URL",
