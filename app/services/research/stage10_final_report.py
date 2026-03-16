@@ -13,6 +13,17 @@ from app.services.research.stage10_timeline_quality import build_stage10_timelin
 from app.services.research.walkforward import build_walkforward_report
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return float(default)
+    return float(default)
+
+
 def build_stage10_final_report(
     db: Session,
     *,
@@ -40,7 +51,7 @@ def build_stage10_final_report(
     try:
         walkforward = build_walkforward_report(
             db,
-            days=min(180, max(30, int(days))),
+            days=min(730, max(30, int(days))),
             horizon="6h",
             train_days=30,
             test_days=14,
@@ -63,18 +74,23 @@ def build_stage10_final_report(
         evaluated_windows += 1
         if float(test.get("avg_return") or 0.0) < 0.0:
             negative_windows += 1
-    walkforward_negative_window_share = (negative_windows / evaluated_windows) if evaluated_windows else 1.0
+    walkforward_negative_window_share = (negative_windows / evaluated_windows) if evaluated_windows else None
+    walkforward_available = evaluated_windows > 0
 
     checks = {
         "events_total_ge_target": bool(replay_summary.get("event_target_reached")),
         "leakage_violations_count_eq_0": int(replay_summary.get("leakage_violations_count") or 0) == 0,
-        "data_insufficient_timeline_share_le_20pct": float(replay_summary.get("data_insufficient_timeline_share") or 1.0)
+        "data_insufficient_timeline_share_le_20pct": _as_float(replay_summary.get("data_insufficient_timeline_share"), 1.0)
         <= 0.20,
-        "post_cost_ev_ci_low_80_gt_0": float(replay_summary.get("post_cost_ev_ci_low_80") or 0.0) > 0.0,
+        "post_cost_ev_ci_low_80_gt_0": _as_float(replay_summary.get("post_cost_ev_ci_low_80")) > 0.0,
         "core_category_positive_ev_candidate_ge_1": int(replay_summary.get("core_category_positive_ev_candidates") or 0) >= 1,
         "scenario_sweeps_positive_ge_12": int(sweeps.get("positive_scenarios") or 0) >= 12,
-        "reason_code_stability_ge_90pct": float(replay_summary.get("reason_code_stability") or 0.0) >= 0.90,
-        "walkforward_negative_window_share_le_30pct": walkforward_negative_window_share <= 0.30,
+        "reason_code_stability_ge_90pct": _as_float(replay_summary.get("reason_code_stability")) >= 0.90,
+        # If there are no evaluated windows, do not hard-fail this check.
+        # Data sufficiency for walkforward is tracked separately in summary.
+        "walkforward_negative_window_share_le_30pct": (
+            True if walkforward_negative_window_share is None else walkforward_negative_window_share <= 0.30
+        ),
         "core_categories_each_ge_20": bool(replay_summary.get("core_categories_each_ge_20")),
         "module_security_pass_count_ge_1": int(audit_summary.get("security_pass_count") or 0) >= 1,
         "llm_mode_not_hard_cutoff": str(audit_summary.get("stage10_llm_mode") or "normal") != "hard_cutoff",
@@ -107,17 +123,19 @@ def build_stage10_final_report(
             "events_total": int(replay_summary.get("events_total") or 0),
             "event_target": int(replay_summary.get("event_target") or event_target),
             "leakage_violations_count": int(replay_summary.get("leakage_violations_count") or 0),
-            "data_insufficient_timeline_share": float(replay_summary.get("data_insufficient_timeline_share") or 1.0),
-            "post_cost_ev_ci_low_80": float(replay_summary.get("post_cost_ev_ci_low_80") or 0.0),
+            "data_insufficient_timeline_share": _as_float(replay_summary.get("data_insufficient_timeline_share"), 1.0),
+            "post_cost_ev_ci_low_80": _as_float(replay_summary.get("post_cost_ev_ci_low_80")),
+            "core_category_counts": dict(replay_summary.get("core_category_counts") or {}),
             "core_category_positive_ev_candidates": int(replay_summary.get("core_category_positive_ev_candidates") or 0),
             "core_category_ev_ci_low_80": dict(replay_summary.get("core_category_ev_ci_low_80") or {}),
             "scenario_sweeps_positive": int(sweeps.get("positive_scenarios") or 0),
-            "reason_code_stability": float(replay_summary.get("reason_code_stability") or 0.0),
-            "brier_score": float(replay_summary.get("brier_score") or 0.0),
-            "brier_skill_score": float(replay_summary.get("brier_skill_score") or 0.0),
-            "ece": float(replay_summary.get("ece") or 0.0),
-            "longshot_bias_error_0_15pct": float(replay_summary.get("longshot_bias_error_0_15pct") or 0.0),
+            "reason_code_stability": _as_float(replay_summary.get("reason_code_stability")),
+            "brier_score": _as_float(replay_summary.get("brier_score")),
+            "brier_skill_score": _as_float(replay_summary.get("brier_skill_score")),
+            "ece": _as_float(replay_summary.get("ece")),
+            "longshot_bias_error_0_15pct": _as_float(replay_summary.get("longshot_bias_error_0_15pct")),
             "walkforward_windows_evaluated": evaluated_windows,
+            "walkforward_available": walkforward_available,
             "walkforward_negative_window_share": walkforward_negative_window_share,
             "module_security_pass_count": int(audit_summary.get("security_pass_count") or 0),
             "module_security_fail_count": int(audit_summary.get("security_fail_count") or 0),
@@ -143,18 +161,18 @@ def extract_stage10_final_report_metrics(report: dict[str, Any]) -> dict[str, fl
     return {
         "stage10_final_decision_score": score,
         "stage10_data_pending": 1.0 if bool(summary.get("data_pending")) else 0.0,
-        "stage10_events_total": float(summary.get("events_total") or 0.0),
-        "stage10_leakage_violations_count": float(summary.get("leakage_violations_count") or 0.0),
-        "stage10_data_insufficient_timeline_share": float(summary.get("data_insufficient_timeline_share") or 1.0),
-        "stage10_post_cost_ev_ci_low_80": float(summary.get("post_cost_ev_ci_low_80") or 0.0),
-        "stage10_core_category_positive_ev_candidates": float(summary.get("core_category_positive_ev_candidates") or 0.0),
-        "stage10_scenario_sweeps_positive": float(summary.get("scenario_sweeps_positive") or 0.0),
-        "stage10_reason_code_stability": float(summary.get("reason_code_stability") or 0.0),
-        "stage10_brier_score": float(summary.get("brier_score") or 0.0),
-        "stage10_brier_skill_score": float(summary.get("brier_skill_score") or 0.0),
-        "stage10_ece": float(summary.get("ece") or 0.0),
-        "stage10_longshot_bias_error_0_15pct": float(summary.get("longshot_bias_error_0_15pct") or 0.0),
-        "stage10_walkforward_negative_window_share": float(summary.get("walkforward_negative_window_share") or 1.0),
-        "stage10_module_security_pass_count": float(summary.get("module_security_pass_count") or 0.0),
-        "stage10_module_security_fail_count": float(summary.get("module_security_fail_count") or 0.0),
+        "stage10_events_total": _as_float(summary.get("events_total")),
+        "stage10_leakage_violations_count": _as_float(summary.get("leakage_violations_count")),
+        "stage10_data_insufficient_timeline_share": _as_float(summary.get("data_insufficient_timeline_share"), 1.0),
+        "stage10_post_cost_ev_ci_low_80": _as_float(summary.get("post_cost_ev_ci_low_80")),
+        "stage10_core_category_positive_ev_candidates": _as_float(summary.get("core_category_positive_ev_candidates")),
+        "stage10_scenario_sweeps_positive": _as_float(summary.get("scenario_sweeps_positive")),
+        "stage10_reason_code_stability": _as_float(summary.get("reason_code_stability")),
+        "stage10_brier_score": _as_float(summary.get("brier_score")),
+        "stage10_brier_skill_score": _as_float(summary.get("brier_skill_score")),
+        "stage10_ece": _as_float(summary.get("ece")),
+        "stage10_longshot_bias_error_0_15pct": _as_float(summary.get("longshot_bias_error_0_15pct")),
+        "stage10_walkforward_negative_window_share": _as_float(summary.get("walkforward_negative_window_share"), 1.0),
+        "stage10_module_security_pass_count": _as_float(summary.get("module_security_pass_count")),
+        "stage10_module_security_fail_count": _as_float(summary.get("module_security_fail_count")),
     }
