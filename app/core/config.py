@@ -17,6 +17,8 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
+    # Comma-separated list of extra admin Telegram user IDs (e.g. "123456,789012")
+    telegram_admin_ids: str = Field(default="", alias="TELEGRAM_ADMIN_IDS")
     admin_api_key: str = Field(default="change-me", alias="ADMIN_API_KEY")
 
     manifold_api_base_url: str = Field(

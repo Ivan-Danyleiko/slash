@@ -5,7 +5,7 @@ from typing import Generator
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, BotCommandScopeDefault, Message
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.enums import AccessLevel, SignalType, SubscriptionStatus
 from app.models.models import Market, Signal, User
+from app.services.dryrun.simulator import check_resolutions, refresh_mark_prices, run_simulation_cycle
 from app.services.telegram_product import TelegramProductService
 
 logger = logging.getLogger(__name__)
@@ -49,11 +50,25 @@ def _db() -> Generator[Session, None, None]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _admin_ids() -> set[str]:
+    """Collect all configured admin Telegram IDs."""
+    ids: set[str] = set()
+    if settings.telegram_chat_id:
+        ids.add(str(settings.telegram_chat_id).strip())
+    for raw in (settings.telegram_admin_ids or "").split(","):
+        uid = raw.strip()
+        if uid:
+            ids.add(uid)
+    return ids
+
+
 def _is_admin(message: Message) -> bool:
-    admin_id = str(settings.telegram_chat_id or "").strip()
-    if not admin_id:
+    admins = _admin_ids()
+    if not admins:
         return False
-    return str(message.chat.id) == admin_id or str(message.from_user.id) == admin_id
+    user_id = str(message.from_user.id)
+    chat_id = str(message.chat.id)
+    return user_id in admins or chat_id in admins
 
 
 def _upsert_user(message: Message) -> User:
@@ -338,13 +353,100 @@ async def cmd_pnl(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Admin: dry-run actions
+# ---------------------------------------------------------------------------
+
+@dp.message(Command("dryrun"))
+async def cmd_dryrun(message: Message) -> None:
+    if not _is_admin(message):
+        await message.answer("⛔ Admin only")
+        return
+    try:
+        await message.answer("⏳ Running simulation cycle\\.\\.\\.", parse_mode="MarkdownV2")
+        with _db() as db:
+            result = run_simulation_cycle(db)
+            db.commit()
+            refresh_mark_prices(db)
+            db.commit()
+            svc = TelegramProductService(db)
+            portfolio_text = svc.get_dryrun_portfolio_text()
+        opened = result.get("opened", 0)
+        skipped = result.get("skipped", 0)
+        cash = result.get("cash_remaining_usd", 0)
+        summary = (
+            f"✅ *Simulation done*\n"
+            f"Opened: `{opened}` · Skipped: `{skipped}` · Cash: `${_mv2(f'{cash:.2f}')}`\n\n"
+            + portfolio_text
+        )
+        await message.answer(summary, parse_mode="MarkdownV2")
+    except Exception as exc:
+        await _err(message, exc)
+
+
+@dp.message(Command("refresh"))
+async def cmd_refresh(message: Message) -> None:
+    if not _is_admin(message):
+        await message.answer("⛔ Admin only")
+        return
+    try:
+        with _db() as db:
+            res_result = check_resolutions(db)
+            db.commit()
+            mark_result = refresh_mark_prices(db)
+            db.commit()
+            svc = TelegramProductService(db)
+            portfolio_text = svc.get_dryrun_portfolio_text()
+        resolved = res_result.get("resolved_closed", 0)
+        updated = mark_result.get("prices_updated", 0)
+        sl_closed = mark_result.get("stop_loss_closed", 0)
+        unreal = mark_result.get("total_unrealized_usd", 0)
+        summary = (
+            f"🔄 *Prices refreshed*\n"
+            f"Updated: `{updated}` · Resolved: `{resolved}` · Stop\\-loss: `{sl_closed}`\n"
+            f"Unrealized: `{_mv2(f'{unreal:+.2f}')} USD`\n\n"
+            + portfolio_text
+        )
+        await message.answer(summary, parse_mode="MarkdownV2")
+    except Exception as exc:
+        await _err(message, exc)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+
+_USER_COMMANDS = [
+    BotCommand(command="start", description="Welcome & command list"),
+    BotCommand(command="top", description="Top 5 signals right now"),
+    BotCommand(command="signals", description="Latest signals"),
+    BotCommand(command="watchlist", description="Your watchlist"),
+    BotCommand(command="digest", description="Today's summary"),
+    BotCommand(command="me", description="Your profile & plan"),
+    BotCommand(command="plans", description="Available plans"),
+]
+
+_ADMIN_COMMANDS = _USER_COMMANDS + [
+    BotCommand(command="portfolio", description="Dry-run portfolio overview"),
+    BotCommand(command="positions", description="Open positions"),
+    BotCommand(command="pnl", description="P&L report"),
+    BotCommand(command="dryrun", description="Run simulation cycle now"),
+    BotCommand(command="refresh", description="Refresh mark prices & resolutions"),
+]
+
 
 async def run_bot() -> None:
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
     bot = Bot(token=settings.telegram_bot_token)
+    # Register command menu (shows up as the / button in Telegram)
+    await bot.set_my_commands(_USER_COMMANDS, scope=BotCommandScopeDefault())
+    # Set full admin command list for each admin
+    from aiogram.types import BotCommandScopeChat
+    for admin_id in _admin_ids():
+        try:
+            await bot.set_my_commands(_ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=int(admin_id)))
+        except Exception:  # noqa: BLE001
+            pass
     await dp.start_polling(bot)
 
 
