@@ -1,5 +1,6 @@
 import httpx
 import json
+from datetime import datetime, timezone
 
 from app.core.config import get_settings
 from app.schemas.collector import NormalizedMarketDTO
@@ -127,11 +128,11 @@ class PolymarketCollector(BaseCollector):
     def fetch_markets(self) -> list[NormalizedMarketDTO]:
         settings = get_settings()
         url = f"{settings.polymarket_api_base_url}/markets"
-        # Fetch up to 500 active markets with pagination
+        # Fetch up to 2000 active markets with pagination
         rows: list[dict] = []
         offset = 0
         page_size = 100
-        while len(rows) < 500:
+        while len(rows) < 2000:
             resp = retry_request(
                 lambda: httpx.get(url, params={  # noqa: B023
                     "limit": page_size,
@@ -186,6 +187,19 @@ class PolymarketCollector(BaseCollector):
                     if clob_reason:
                         payload["clob_reason_code"] = clob_reason
 
+            # Parse resolution time from endDate field
+            resolution_time: datetime | None = None
+            end_date_raw = row.get("endDate") or row.get("endDateIso")
+            if end_date_raw:
+                try:
+                    resolution_time = datetime.fromisoformat(
+                        str(end_date_raw).replace("Z", "+00:00")
+                    )
+                    if resolution_time.tzinfo is None:
+                        resolution_time = resolution_time.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    pass
+
             markets.append(
                 NormalizedMarketDTO(
                     platform=self.platform_name,
@@ -200,6 +214,7 @@ class PolymarketCollector(BaseCollector):
                     volume_24h=float(row.get("volume24h") or row.get("volume24hr") or row.get("volumeNum") or 0),
                     liquidity_value=float(row.get("liquidity") or row.get("liquidityNum") or 0),
                     rules_text=row.get("rules"),
+                    resolution_time=resolution_time,
                     source_payload=payload,
                 )
             )
