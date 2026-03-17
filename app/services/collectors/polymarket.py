@@ -139,8 +139,6 @@ class PolymarketCollector(BaseCollector):
                     "offset": offset,
                     "active": "true",
                     "closed": "false",
-                    "order": "end_date_min",
-                    "ascending": "true",
                 }, timeout=20.0),
                 retries=3,
                 backoff_seconds=1.0,
