@@ -128,17 +128,19 @@ class PolymarketCollector(BaseCollector):
     def fetch_markets(self) -> list[NormalizedMarketDTO]:
         settings = get_settings()
         url = f"{settings.polymarket_api_base_url}/markets"
-        # Fetch up to 2000 active markets with pagination
+        # Fetch up to 10000 active markets sorted by end date (nearest first)
         rows: list[dict] = []
         offset = 0
         page_size = 100
-        while len(rows) < 2000:
+        while len(rows) < 10000:
             resp = retry_request(
                 lambda: httpx.get(url, params={  # noqa: B023
                     "limit": page_size,
                     "offset": offset,
                     "active": "true",
                     "closed": "false",
+                    "order": "end_date_min",
+                    "ascending": "true",
                 }, timeout=20.0),
                 retries=3,
                 backoff_seconds=1.0,
