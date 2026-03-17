@@ -334,7 +334,8 @@ class TelegramProductService:
             title = self._esc(market.title[:55]) if market else "Unknown"
             deadline_str = ""
             if pos.resolution_deadline:
-                deadline_str = f"\n⏳ `{pos.resolution_deadline.strftime('%Y\\-%m\\-%d')}`"
+                _dl = pos.resolution_deadline.strftime("%Y-%m-%d").replace("-", "\\-")
+                deadline_str = f"\n⏳ `{_dl}`"
             kelly_str = f"Kelly `{(pos.entry_kelly_fraction or 0)*100:.1f}%`" if pos.entry_kelly_fraction else ""
             lines += [
                 f"{nums[i]} {direction_icon} *{pos.direction}* · {self._esc(pos.platform)}",
