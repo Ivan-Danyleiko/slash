@@ -116,7 +116,7 @@ async def cmd_start(message: Message) -> None:
             "/me — your profile"
         )
         if _is_admin(message):
-            text += "\n\nAdmin:\n/portfolio — dry-run balance\n/positions — open trades\n/pnl — performance stats"
+            text += "\n\nAdmin:\n/portfolio — dry-run balance\n/positions — open trades\n/pnl — performance stats\n/dryrun — run simulation now\n/refresh — update mark prices"
         await message.answer(text)
     except Exception as exc:
         await _err(message, exc)
@@ -168,7 +168,7 @@ async def cmd_signals(message: Message) -> None:
                 title = _mv2(s.title[:80])
                 conf = _mv2(f"{s.confidence_score or 0:.2f}")
                 link = f"[Open Market]({market.url})" if market and market.url else ""
-                parts.append(f"*{sig_type}* | c={conf}\n{title}\n{link}")
+                parts.append(f"*{sig_type}* \\| c={conf}\n{title}\n{link}")
             await message.answer("\n\n".join(parts), parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as exc:
         await _err(message, exc)
@@ -208,7 +208,7 @@ async def cmd_top(message: Message) -> None:
                 score = _mv2(f"{s.confidence_score or 0:.2f}")
                 title = _mv2(s.title[:88])
                 link = f"[Open Market]({market.url})" if market and market.url else ""
-                parts.append(f"{num} *{sig_type}* | score={score}\n{title}\n{link}")
+                parts.append(f"{num} *{sig_type}* \\| score={score}\n{title}\n{link}")
             await message.answer("\n\n".join(parts), parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as exc:
         await _err(message, exc)
