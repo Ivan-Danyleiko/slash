@@ -1,8 +1,8 @@
 """Dry-run paper trading simulator.
 
 Virtual $100 account. Opens positions on ARBITRAGE_CANDIDATE signals where
-Stage8Decision says EXECUTE and AI agent (Stage7) says KEEP.
-Position sizing: Kelly-based, clamped to [3%, 5%] of portfolio cash.
+AI agent (Stage7) says KEEP. Stage8 live-trading gate is bypassed for paper
+trading — positions sized by Kelly criterion, clamped to [3%, 5%] of cash.
 No real orders are sent — purely simulated P&L tracking.
 """
 from __future__ import annotations
@@ -23,7 +23,6 @@ from app.models.models import (
     Market,
     Signal,
     Stage7AgentDecision,
-    Stage8Decision,
 )
 from app.utils.http import retry_request
 
@@ -167,31 +166,32 @@ def _get_token_id(market: Market) -> str | None:
 
 
 def run_simulation_cycle(db: Session) -> dict[str, Any]:
-    """Scan new KEEP signals and open paper positions. Returns summary."""
+    """Scan new KEEP signals and open paper positions. Returns summary.
+
+    Entry criteria (dry-run / paper trading):
+      - Stage7 decision = KEEP  (AI agent approved)
+      - Signal type = ARBITRAGE_CANDIDATE
+      - Market has best_ask_yes price
+      Stage8 EXECUTE_ALLOWED is NOT required — Stage8 is a live-trading safety
+      gate; for paper trading we bypass it and use Stage7 directly.
+    """
     portfolio = get_or_create_portfolio(db)
     opened = 0
     skipped = 0
     reasons: list[str] = []
 
-    # Find signals with Stage8 EXECUTE decision that have Stage7 KEEP
-    # Join: Signal → Stage8Decision → Stage7AgentDecision
+    # Stage7 KEEP + valid market price — Stage8 not required for paper trading
     rows = list(
         db.execute(
-            select(Signal, Stage8Decision, Stage7AgentDecision, Market)
-            .join(Stage8Decision, Stage8Decision.signal_id == Signal.id)
-            .join(
-                Stage7AgentDecision,
-                Stage7AgentDecision.id == Stage8Decision.stage7_decision_id,
-                isouter=True,
-            )
+            select(Signal, Stage7AgentDecision, Market)
+            .join(Stage7AgentDecision, Stage7AgentDecision.signal_id == Signal.id)
             .join(Market, Market.id == Signal.market_id)
             .where(
                 Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
-                Stage8Decision.execution_action == "EXECUTE_ALLOWED",
                 Stage7AgentDecision.decision == "KEEP",
                 Market.best_ask_yes.is_not(None),
             )
-            .order_by(Stage8Decision.created_at.desc())
+            .order_by(Stage7AgentDecision.created_at.desc())
             .limit(50)
         )
     )
@@ -208,7 +208,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
 
     now = datetime.now(UTC)
 
-    for signal, s8, s7, market in rows:
+    for signal, s7, market in rows:
         if market.id in open_market_ids:
             skipped += 1
             continue
@@ -217,17 +217,18 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         if direction not in ("YES", "NO"):
             direction = "YES"
 
-        kelly = float(s8.kelly_fraction or (s7.evidence_bundle or {}).get("kelly_fraction") or 0.0)
-        ev_pct = float(
-            (s7.evidence_bundle or {}).get("expected_ev_pct")
-            or (s8.edge_after_costs or 0.0)
-        )
+        ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
+        kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
+        ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
+
+        # Fallback: use confidence_score as EV proxy so we always open something
+        if ev_pct <= 0.0 and signal.confidence_score:
+            ev_pct = float(signal.confidence_score) * 0.05  # conservative proxy
 
         position_pct = _compute_position_pct(kelly, ev_pct)
         if position_pct is None:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: ev={ev_pct:.4f} kelly={kelly:.4f} → skip")
-            continue
+            # Last resort: always allocate min size for dry-run learning
+            position_pct = MIN_POSITION_PCT
 
         notional = portfolio.current_cash_usd * position_pct
         if notional < MIN_NOTIONAL_USD:
@@ -253,7 +254,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             notional_usd=notional,
             shares_count=shares,
             status="OPEN",
-            open_reason=f"kelly={kelly:.4f},ev={ev_pct:.4f},stage8=EXECUTE,stage7=KEEP",
+            open_reason=f"kelly={kelly:.4f},ev={ev_pct:.4f},stage7=KEEP",
             entry_kelly_fraction=kelly,
             entry_ev_pct=ev_pct,
             unrealized_pnl_usd=0.0,
