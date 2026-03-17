@@ -403,7 +403,7 @@ async def cmd_refresh(message: Message) -> None:
         summary = (
             f"🔄 *Prices refreshed*\n"
             f"Updated: `{updated}` · Resolved: `{resolved}` · Stop\\-loss: `{sl_closed}`\n"
-            f"Unrealized: `{_mv2(f'{unreal:+.2f}')} USD`\n\n"
+            f"Unrealized: `{_mv2(f'${unreal:+.2f}')}`\n\n"
             + portfolio_text
         )
         await message.answer(summary, parse_mode="MarkdownV2")

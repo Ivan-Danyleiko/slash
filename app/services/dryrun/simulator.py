@@ -247,7 +247,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             portfolio_id=portfolio.id,
             signal_id=signal.id,
             market_id=market.id,
-            platform=str(market.source_payload.get("platform") if market.source_payload else "POLYMARKET") or "POLYMARKET",
+            platform=(market.source_payload or {}).get("platform") or "POLYMARKET",
             direction=direction,
             entry_price=entry_price,
             mark_price=entry_price,
