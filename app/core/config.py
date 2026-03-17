@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(alias="REDIS_URL")
 
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
     admin_api_key: str = Field(default="change-me", alias="ADMIN_API_KEY")
 
     manifold_api_base_url: str = Field(

@@ -88,13 +88,14 @@ class PolymarketCollector(BaseCollector):
         return None
 
     def _fetch_clob_top(self, *, token_id: str, settings) -> tuple[float | None, float | None, str | None]:
-        url = f"{settings.polymarket_clob_api_base_url}/order-book/{token_id}"
+        # Correct endpoint: /book?token_id=... (not /order-book/{id})
+        url = f"{settings.polymarket_clob_api_base_url}/book"
         headers = {"Accept": "application/json"}
         if settings.polymarket_clob_api_key:
             headers["Authorization"] = f"Bearer {settings.polymarket_clob_api_key}"
         try:
             resp = retry_request(
-                lambda: httpx.get(url, headers=headers, timeout=10.0),
+                lambda: httpx.get(url, params={"token_id": token_id}, headers=headers, timeout=10.0),
                 retries=2,
                 backoff_seconds=0.5,
                 platform=self.platform_name,
@@ -104,20 +105,17 @@ class PolymarketCollector(BaseCollector):
             payload = resp.json() or {}
             bids = payload.get("bids") if isinstance(payload, dict) else None
             asks = payload.get("asks") if isinstance(payload, dict) else None
+            # CLOB returns bids ascending (best bid = last) and asks descending (best ask = last)
             bid = None
             ask = None
             if isinstance(bids, list) and bids:
-                top_bid = bids[0]
-                if isinstance(top_bid, list) and top_bid:
-                    bid = self._pick_float({"v": top_bid[0]}, ("v",))
-                elif isinstance(top_bid, dict):
-                    bid = self._pick_float(top_bid, ("price", "p"))
+                best_bid = bids[-1]
+                if isinstance(best_bid, dict):
+                    bid = self._pick_float(best_bid, ("price", "p"))
             if isinstance(asks, list) and asks:
-                top_ask = asks[0]
-                if isinstance(top_ask, list) and top_ask:
-                    ask = self._pick_float({"v": top_ask[0]}, ("v",))
-                elif isinstance(top_ask, dict):
-                    ask = self._pick_float(top_ask, ("price", "p"))
+                best_ask = asks[-1]
+                if isinstance(best_ask, dict):
+                    ask = self._pick_float(best_ask, ("price", "p"))
             if bid is None or ask is None:
                 return None, None, "clob_orderbook_empty"
             if ask < bid:
@@ -129,14 +127,30 @@ class PolymarketCollector(BaseCollector):
     def fetch_markets(self) -> list[NormalizedMarketDTO]:
         settings = get_settings()
         url = f"{settings.polymarket_api_base_url}/markets"
-        resp = retry_request(
-            lambda: httpx.get(url, params={"limit": 100}, timeout=20.0),
-            retries=3,
-            backoff_seconds=1.0,
-            platform=self.platform_name,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
+        # Fetch up to 500 active markets with pagination
+        rows: list[dict] = []
+        offset = 0
+        page_size = 100
+        while len(rows) < 500:
+            resp = retry_request(
+                lambda: httpx.get(url, params={  # noqa: B023
+                    "limit": page_size,
+                    "offset": offset,
+                    "active": "true",
+                    "closed": "false",
+                }, timeout=20.0),
+                retries=3,
+                backoff_seconds=1.0,
+                platform=self.platform_name,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
 
         markets: list[NormalizedMarketDTO] = []
         for row in rows:
@@ -150,9 +164,13 @@ class PolymarketCollector(BaseCollector):
             if isinstance(row.get("notionalValue"), (int, float)):
                 payload["notionalValueDollars"] = row.get("notionalValue")
 
-            # Stage 9 CLOB mode: prefer explicit bid/ask when available;
-            # fallback to gamma-only mode with a reason marker.
-            if settings.polymarket_clob_enabled:
+            # Stage 9 CLOB mode: fetch real bid/ask only for markets with real liquidity
+            # (> $500) to avoid 500 sequential HTTP calls per sync cycle.
+            clob_eligible = (
+                settings.polymarket_clob_enabled
+                and float(row.get("liquidityNum") or row.get("liquidity") or 0) >= 500
+            )
+            if clob_eligible:
                 token_id = self._extract_token_id(row)
                 if token_id:
                     bid, ask, clob_reason = self._fetch_clob_top(token_id=token_id, settings=settings)

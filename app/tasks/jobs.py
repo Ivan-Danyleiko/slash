@@ -19,6 +19,7 @@ from app.models.models import (
     User,
 )
 from app.services.collectors.sync_service import CollectorSyncService
+from app.services.research.stage7_shadow import build_stage7_shadow_report
 from app.services.research.stage8_shadow_ledger import (
     build_stage8_shadow_ledger_report,
     extract_stage8_shadow_ledger_metrics,
@@ -178,7 +179,7 @@ def generate_signals_job(db: Session) -> dict:
 
 
 def send_test_signal_job(db: Session) -> dict:
-    latest = db.query(Signal).order_by(Signal.id.desc()).first()
+    latest = db.scalar(select(Signal).order_by(Signal.id.desc()))
     return {
         "status": "ok",
         "message": "Telegram send is wired in bot service; this endpoint returns preview for MVP.",
@@ -223,8 +224,11 @@ def signal_push_job(db: Session) -> dict:
         def _skip(reason: str) -> None:
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
 
+        # Pre-load signal pool once — avoids 200-row query × N users
+        signal_pool = svc.load_signal_pool()
+
         for user in users:
-            top = svc.top_ranked_signals(user=user, limit=5)
+            top = svc.top_ranked_signals(user=user, limit=5, pool=signal_pool)
             top = [s for s in top if rank_score(s) > 0.1][:5]
             for signal in top:
                 if not svc.can_send_signal(user, 1):
@@ -262,22 +266,27 @@ def signal_push_job(db: Session) -> dict:
                     metric_label = "Divergence"
                     metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
                 prepared += 1
+                def _e(s: str) -> str:
+                    for ch in r"\_*[]()~`>#+-=|{}.!":
+                        s = s.replace(ch, f"\\{ch}")
+                    return s
+
                 text = (
-                    f"🔥 *{signal.signal_type.value}*\\n"
-                    f"{signal.title}\\n"
-                    f"Confidence: {signal.confidence_score or 0:.2f}\\n"
-                    f"{metric_label}: {metric_value:.1f}%\\n"
-                    f"Utility (exec): {utility:.3f}\\n"
-                    f"Edge after costs: {slippage_edge:.3f} (cost impact: {cost_impact:.3f})\\n"
-                    f"Execution assumptions: `{assumptions}`\\n"
-                    f"_Disclaimer: {settings.research_ethics_disclaimer_text}_"
+                    f"🔥 *{_e(signal.signal_type.value)}*\n"
+                    f"{_e(signal.title)}\n"
+                    f"Confidence: {_e(f'{signal.confidence_score or 0:.2f}')}\n"
+                    f"{_e(metric_label)}: {_e(f'{metric_value:.1f}%')}\n"
+                    f"Utility \\(exec\\): {_e(f'{utility:.3f}')}\n"
+                    f"Edge after costs: {_e(f'{slippage_edge:.3f}')} \\(cost impact: {_e(f'{cost_impact:.3f}')}\\)\n"
+                    f"Execution assumptions: `{_e(assumptions)}`\n"
+                    f"_Disclaimer: {_e(settings.research_ethics_disclaimer_text)}_"
                 )
                 resp = httpx.post(
                     f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
                     json={
                         "chat_id": user.telegram_user_id,
                         "text": text,
-                        "parse_mode": "Markdown",
+                        "parse_mode": "MarkdownV2",
                         "disable_web_page_preview": True,
                     },
                     timeout=10.0,
@@ -296,7 +305,7 @@ def signal_push_job(db: Session) -> dict:
 def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
     job = _start_job(db, "cleanup_old_signals")
     try:
-        cutoff = datetime.utcnow().replace(microsecond=0) - timedelta(days=keep_days)  # type: ignore[name-defined]
+        cutoff = datetime.now(UTC).replace(microsecond=0) - timedelta(days=keep_days)
         has_stage7_ref = exists(
             select(Stage7AgentDecision.id).where(Stage7AgentDecision.signal_id == Signal.id)
         )
@@ -435,6 +444,38 @@ def provider_contract_checks_job(db: Session) -> dict:
     status = "SUCCESS" if not failed else "FAILED"
     _finish_job(db, job, status, summary)
     return {"status": ("ok" if not failed else "error"), "result": summary}
+
+
+def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200) -> dict:
+    """Evaluate recent signals via Stage 7 LLM agent and store decisions."""
+    job = _start_job(db, "stage7_evaluate")
+    try:
+        settings = get_settings()
+        report = build_stage7_shadow_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+        rows_total = len(list(report.get("rows") or []))
+        llm_calls = int((report.get("cost_control") or {}).get("llm_calls_run") or 0)
+        cache_hits = int((report.get("cost_control") or {}).get("cache_hits_run") or 0)
+        decision_counts = report.get("decision_counts") or {}
+        _finish_job(db, job, "SUCCESS", {
+            "rows_total": rows_total,
+            "llm_calls": llm_calls,
+            "cache_hits": cache_hits,
+            "decision_counts": decision_counts,
+        })
+        return {"status": "ok", "result": {
+            "rows_total": rows_total,
+            "llm_calls": llm_calls,
+            "cache_hits": cache_hits,
+            "decision_counts": decision_counts,
+        }}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": str(exc)})
+        return {"status": "error", "error": str(exc)}
 
 
 def stage8_shadow_ledger_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:

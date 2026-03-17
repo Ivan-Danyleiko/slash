@@ -527,6 +527,54 @@ class UserEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class DryrunPortfolio(Base):
+    """Virtual paper-trading portfolio for dry-run simulator."""
+
+    __tablename__ = "dryrun_portfolios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    initial_balance_usd: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
+    current_cash_usd: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
+    total_realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DryrunPosition(Base):
+    """Single paper-trading position opened by dry-run simulator."""
+
+    __tablename__ = "dryrun_positions"
+    __table_args__ = (
+        Index("ix_dryrun_positions_portfolio_status", "portfolio_id", "status"),
+        Index("ix_dryrun_positions_signal_id", "signal_id"),
+        Index("ix_dryrun_positions_market_id", "market_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("dryrun_portfolios.id"), nullable=False)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(64), nullable=False, default="POLYMARKET")
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # YES / NO
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    shares_count: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")  # OPEN / CLOSED / EXPIRED
+    open_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)  # resolved_yes/resolved_no/stop_loss/expired/ai_remove
+    entry_kelly_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_ev_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    resolution_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SignalGenerationStats(Base):
     __tablename__ = "signal_generation_stats"
     __table_args__ = (

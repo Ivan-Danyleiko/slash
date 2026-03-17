@@ -17,6 +17,7 @@ from app.tasks.jobs import (
     stage10_timeline_backfill_job,
     stage11_track_job,
     stage11_reconcile_job,
+    stage7_evaluate_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
     label_signal_history_1h_job,
@@ -33,7 +34,14 @@ from app.tasks.jobs import (
 )
 
 
-@celery_app.task(name="sync_all_platforms")
+@celery_app.task(
+    name="sync_all_platforms",
+    autoretry_for=(Exception,),
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
 def sync_all_platforms_task() -> dict:
     db = SessionLocal()
     try:
@@ -213,6 +221,22 @@ def provider_contract_checks_task() -> dict:
         db.close()
 
 
+@celery_app.task(
+    name="stage7_evaluate",
+    autoretry_for=(Exception,),
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
+def stage7_evaluate_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage7_evaluate_job(db)
+    finally:
+        db.close()
+
+
 @celery_app.task(name="stage8_shadow_ledger")
 def stage8_shadow_ledger_task() -> dict:
     db = SessionLocal()
@@ -309,6 +333,7 @@ celery_app.conf.beat_schedule = {
     "cleanup-old-signals-nightly": {"task": "cleanup_old_signals", "schedule": crontab(hour=3, minute=0)},
     "cleanup-signal-history-nightly": {"task": "cleanup_signal_history", "schedule": crontab(hour=3, minute=20)},
     "provider-contract-checks-hourly": {"task": "provider_contract_checks", "schedule": crontab(minute=40)},
+    "stage7-evaluate-every-30-min": {"task": "stage7_evaluate", "schedule": crontab(minute="*/30")},
     "stage8-shadow-ledger-daily": {"task": "stage8_shadow_ledger", "schedule": crontab(hour=2, minute=45)},
     "stage8-final-report-daily": {"task": "stage8_final_report", "schedule": crontab(hour=2, minute=55)},
     "stage9-track-daily": {"task": "stage9_track", "schedule": crontab(hour=3, minute=5)},

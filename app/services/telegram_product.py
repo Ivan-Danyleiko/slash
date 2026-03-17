@@ -1,11 +1,11 @@
 from datetime import UTC, date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func as sqlfunc, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.enums import AccessLevel, SignalType
-from app.models.models import Market, Signal, User, UserEvent, WatchlistItem
+from app.models.models import DryrunPortfolio, DryrunPosition, Market, Signal, User, UserEvent, WatchlistItem
 from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.research.ab_testing import get_ab_variant_for_user
 
@@ -61,33 +61,60 @@ class TelegramProductService:
         return True
 
     def list_watchlist(self, user: User) -> list[dict]:
-        rows = list(self.db.scalars(select(WatchlistItem).where(WatchlistItem.user_id == user.id).order_by(WatchlistItem.id.desc())))
-        out: list[dict] = []
-        for row in rows:
-            market = self.db.get(Market, row.market_id)
-            if not market:
-                continue
-            last_signal = self.db.scalar(select(Signal).where(Signal.market_id == market.id).order_by(Signal.created_at.desc()))
-            out.append(
-                {
-                    "market_id": market.id,
-                    "title": market.title,
-                    "probability_yes": market.probability_yes,
-                    "last_signal_type": last_signal.signal_type.value if last_signal else None,
-                    "url": market.url,
-                }
+        # Single query: join WatchlistItem + Market
+        item_market_rows = list(
+            self.db.execute(
+                select(WatchlistItem, Market)
+                .join(Market, Market.id == WatchlistItem.market_id)
+                .where(WatchlistItem.user_id == user.id)
+                .order_by(WatchlistItem.id.desc())
             )
-        return out
+        )
+        if not item_market_rows:
+            return []
+        market_ids = [market.id for _, market in item_market_rows]
+        # Fetch latest signal per market in one query using max(id) subquery
+        latest_sig_subq = (
+            select(Signal.market_id, sqlfunc.max(Signal.id).label("max_id"))
+            .where(Signal.market_id.in_(market_ids))
+            .group_by(Signal.market_id)
+            .subquery()
+        )
+        latest_signals: dict[int, str] = {
+            row.market_id: row.signal_type.value
+            for row in self.db.scalars(
+                select(Signal).join(latest_sig_subq, Signal.id == latest_sig_subq.c.max_id)
+            )
+        }
+        return [
+            {
+                "market_id": market.id,
+                "title": market.title,
+                "probability_yes": market.probability_yes,
+                "last_signal_type": latest_signals.get(market.id),
+                "url": market.url,
+            }
+            for _, market in item_market_rows
+        ]
 
-    def top_ranked_signals(self, user: User, limit: int = 5) -> list[Signal]:
-        rows = list(self.db.scalars(select(Signal).order_by(Signal.created_at.desc()).limit(200)))
+    def load_signal_pool(self, limit: int = 200) -> list[Signal]:
+        """Pre-load actionable signals once; pass the result to top_ranked_signals as `pool`."""
         now = datetime.now(UTC)
-        filtered: list[Signal] = []
-        for signal in rows:
-            market = self.db.get(Market, signal.market_id)
-            if not self._market_is_actionable(market, now=now):
-                continue
-            filtered.append(signal)
+        rows = list(
+            self.db.execute(
+                select(Signal, Market)
+                .join(Market, Market.id == Signal.market_id)
+                .order_by(Signal.created_at.desc())
+                .limit(limit)
+            )
+        )
+        return [signal for signal, market in rows if self._market_is_actionable(market, now=now)]
+
+    def top_ranked_signals(self, user: User, limit: int = 5, pool: list[Signal] | None = None) -> list[Signal]:
+        # If a pre-loaded pool is provided, skip the DB query (avoids N+1 in push jobs)
+        if pool is None:
+            pool = self.load_signal_pool()
+        filtered: list[Signal] = pool
         settings = get_settings()
         max_allowed = min(limit, PLAN_LIMITS[user.access_level]["signals"])
         variant = get_ab_variant_for_user(user_id=user.id, settings=settings)
@@ -119,23 +146,24 @@ class TelegramProductService:
         return rows
 
     def daily_digest(self, user: User) -> str:
+        """Returns MarkdownV2-formatted daily digest."""
         settings = get_settings()
         if user.last_digest_sent and user.last_digest_sent.date() == date.today():
-            return "📬 Daily digest already sent today."
-        top_div = list(self.db.scalars(select(Signal).where(Signal.divergence_score.is_not(None)).order_by(Signal.divergence_score.desc()).limit(3)))
-        weird = list(
-            self.db.scalars(
-                select(Signal)
-                .where(Signal.signal_type == SignalType.WEIRD_MARKET)
-                .order_by(Signal.created_at.desc())
-                .limit(3)
-            )
-        )
+            return "📬 Daily digest already sent today\\."
+        top_div = list(self.db.scalars(
+            select(Signal).where(Signal.divergence_score.is_not(None))
+            .order_by(Signal.divergence_score.desc()).limit(3)
+        ))
+        weird = list(self.db.scalars(
+            select(Signal).where(Signal.signal_type == SignalType.WEIRD_MARKET)
+            .order_by(Signal.created_at.desc()).limit(3)
+        ))
         watch = self.list_watchlist(user)[:3]
+        disclaimer = self._esc(settings.research_ethics_disclaimer_text)
 
         lines = [
             "📬 *Prediction Markets Daily Digest*",
-            f"_Disclaimer: {settings.research_ethics_disclaimer_text}_",
+            f"_{disclaimer}_",
             "",
             "*Top Divergences*",
         ]
@@ -143,24 +171,23 @@ class TelegramProductService:
             for s in top_div:
                 ex = s.execution_analysis or {}
                 util = float(ex.get("utility_score") or 0.0)
-                assump = str(ex.get("assumptions_version") or "n/a")
-                lines.append(
-                    f"• {s.title[:64]} → {(s.divergence_score or 0)*100:.1f}% | util={util:.3f} | {assump}"
-                )
+                title = self._esc(s.title[:64])
+                div_pct = self._esc(f"{(s.divergence_score or 0)*100:.1f}%")
+                lines.append(f"• {title} → {div_pct} \\| util={self._esc(f'{util:.3f}')}")
         else:
             lines.append("• No significant divergences today")
         lines.append("")
         lines.append("*Top Weird Markets*")
         if weird:
             for s in weird:
-                lines.append(f"• {s.title[:64]}")
+                lines.append(f"• {self._esc(s.title[:64])}")
         else:
             lines.append("• No weird markets detected")
         lines.append("")
         lines.append("*Watchlist Alerts*")
         if watch:
             for w in watch:
-                lines.append(f"• {w['title'][:64]}")
+                lines.append(f"• {self._esc(w['title'][:64])}")
         else:
             lines.append("• No watchlist alerts")
 
@@ -188,6 +215,203 @@ class TelegramProductService:
             )
         )
         self.db.commit()
+
+    # ------------------------------------------------------------------
+    # Dry-run portfolio formatting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _esc(text: str) -> str:
+        """Escape Markdown special chars to prevent parse errors."""
+        for ch in ("_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+            text = text.replace(ch, f"\\{ch}")
+        return text
+
+    def _get_dryrun_portfolio(self) -> DryrunPortfolio | None:
+        return self.db.scalar(select(DryrunPortfolio).where(DryrunPortfolio.name == "default").limit(1))
+
+    def get_dryrun_portfolio_text(self) -> str:
+        portfolio = self._get_dryrun_portfolio()
+        if portfolio is None:
+            return "💼 *Dry\\-Run Portfolio*\n\nNo portfolio yet\\. Use `/dryrun run` to start\\."
+
+        open_positions = list(
+            self.db.scalars(
+                select(DryrunPosition).where(
+                    DryrunPosition.portfolio_id == portfolio.id,
+                    DryrunPosition.status == "OPEN",
+                )
+            )
+        )
+        closed_positions = list(
+            self.db.scalars(
+                select(DryrunPosition).where(
+                    DryrunPosition.portfolio_id == portfolio.id,
+                    DryrunPosition.status == "CLOSED",
+                )
+            )
+        )
+        wins = [p for p in closed_positions if p.realized_pnl_usd > 0]
+        n_closed = len(closed_positions)
+        win_rate = len(wins) / n_closed if n_closed > 0 else 0.0
+
+        open_notional = sum(p.notional_usd + p.unrealized_pnl_usd for p in open_positions)
+        total_value = portfolio.current_cash_usd + open_notional
+        roi = (total_value - portfolio.initial_balance_usd) / portfolio.initial_balance_usd * 100
+
+        roi_sign = "+" if roi >= 0 else ""
+        real_sign = "+" if portfolio.total_realized_pnl_usd >= 0 else ""
+        unreal_sign = "+" if portfolio.total_unrealized_pnl_usd >= 0 else ""
+
+        # Kelly expectation
+        avg_win = sum(p.realized_pnl_usd for p in wins) / len(wins) if wins else 0.0
+        losses_list = [p for p in closed_positions if p.realized_pnl_usd <= 0]
+        avg_loss = abs(sum(p.realized_pnl_usd for p in losses_list) / len(losses_list)) if losses_list else 0.0
+        kelly_e = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win if avg_win > 0 else 0.0
+        profit_prob = win_rate * 100.0
+
+        lines = [
+            "💼 *Dry\\-Run Portfolio*",
+            "━━━━━━━━━━━━━━━━",
+            f"💵 Cash:       `${portfolio.current_cash_usd:.2f}`",
+            f"📦 In trades:  `${sum(p.notional_usd for p in open_positions):.2f}`  \\({len(open_positions)} open\\)",
+            f"🏦 Total:      `${total_value:.2f}`",
+            "",
+            f"📈 Realized:   `{real_sign}${portfolio.total_realized_pnl_usd:.2f}`",
+            f"📉 Unrealized: `{unreal_sign}${portfolio.total_unrealized_pnl_usd:.2f}`",
+            f"📊 ROI:        `{roi_sign}{roi:.2f}%`",
+            "",
+        ]
+        if n_closed > 0:
+            lines += [
+                f"🎯 Win rate:   `{win_rate*100:.0f}%`  \\({len(wins)}/{n_closed} closed\\)",
+                f"⚡ Kelly E:    `{kelly_e:.4f}`",
+                f"🎲 Profit prob: `{profit_prob:.1f}%`",
+            ]
+        else:
+            lines.append("_No closed positions yet_")
+
+        return "\n".join(lines)
+
+    def get_dryrun_positions_text(self) -> str:
+        portfolio = self._get_dryrun_portfolio()
+        if portfolio is None:
+            return "📂 No portfolio found\\."
+
+        open_positions = list(
+            self.db.execute(
+                select(DryrunPosition, Market)
+                .join(Market, Market.id == DryrunPosition.market_id)
+                .where(
+                    DryrunPosition.portfolio_id == portfolio.id,
+                    DryrunPosition.status == "OPEN",
+                )
+                .order_by(DryrunPosition.opened_at.desc())
+                .limit(5)
+            )
+        )
+
+        if not open_positions:
+            return "📂 *Open Positions*\n\n_No open positions\\. Run `/dryrun run` to open some\\._"
+
+        total_count = self.db.scalar(
+            select(sqlfunc.count()).select_from(DryrunPosition).where(
+                DryrunPosition.portfolio_id == portfolio.id,
+                DryrunPosition.status == "OPEN",
+            )
+        ) or 0
+
+        lines = [f"📂 *Open Positions* — {total_count}", ""]
+
+        nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        for i, (pos, market) in enumerate(open_positions):
+            mark = pos.mark_price or pos.entry_price
+            pnl = pos.unrealized_pnl_usd
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_pct = (mark - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
+            pnl_pct_sign = "+" if pnl_pct >= 0 else ""
+            direction_icon = "🟢" if pos.direction == "YES" else "🔴"
+            title = self._esc(market.title[:55]) if market else "Unknown"
+            deadline_str = ""
+            if pos.resolution_deadline:
+                deadline_str = f"\n⏳ `{pos.resolution_deadline.strftime('%Y\\-%m\\-%d')}`"
+            kelly_str = f"Kelly `{(pos.entry_kelly_fraction or 0)*100:.1f}%`" if pos.entry_kelly_fraction else ""
+            lines += [
+                f"{nums[i]} {direction_icon} *{pos.direction}* · {self._esc(pos.platform)}",
+                f"_{title}_",
+                f"Entry `${pos.entry_price:.3f}` → Now `${mark:.3f}`  `{pnl_sign}${pnl:.2f}` \\(`{pnl_pct_sign}{pnl_pct:.1f}%`\\)",
+                f"`${pos.notional_usd:.2f}` · `{pos.shares_count:.2f}` shares" + (f" · {kelly_str}" if kelly_str else "") + deadline_str,
+                "",
+            ]
+
+        if total_count > 5:
+            lines.append(f"_\\.\\.\\. \\+{total_count - 5} more positions_")
+
+        return "\n".join(lines)
+
+    def get_dryrun_pnl_text(self) -> str:
+        portfolio = self._get_dryrun_portfolio()
+        if portfolio is None:
+            return "📊 *P&L Report*\n\n_No data yet\\._"
+
+        closed = list(
+            self.db.scalars(
+                select(DryrunPosition).where(
+                    DryrunPosition.portfolio_id == portfolio.id,
+                    DryrunPosition.status == "CLOSED",
+                )
+            )
+        )
+        open_pos = list(
+            self.db.scalars(
+                select(DryrunPosition).where(
+                    DryrunPosition.portfolio_id == portfolio.id,
+                    DryrunPosition.status == "OPEN",
+                )
+            )
+        )
+
+        n_closed = len(closed)
+        wins = [p for p in closed if p.realized_pnl_usd > 0]
+        losses = [p for p in closed if p.realized_pnl_usd <= 0]
+        win_rate = len(wins) / n_closed if n_closed > 0 else 0.0
+        avg_win = sum(p.realized_pnl_usd for p in wins) / len(wins) if wins else 0.0
+        avg_loss = abs(sum(p.realized_pnl_usd for p in losses) / len(losses)) if losses else 0.0
+        kelly_e = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win if avg_win > 0 else 0.0
+        profit_prob = win_rate * 100.0
+
+        open_notional = sum(p.notional_usd + p.unrealized_pnl_usd for p in open_pos)
+        total_value = portfolio.current_cash_usd + open_notional
+        roi = (total_value - portfolio.initial_balance_usd) / portfolio.initial_balance_usd * 100
+        roi_sign = "+" if roi >= 0 else ""
+
+        lines = [
+            "📊 *P&L Report*",
+            "━━━━━━━━━━━━━",
+        ]
+        if n_closed > 0:
+            lines += [
+                f"Closed: `{n_closed}`  ·  Won: `{len(wins)}`  ·  Lost: `{len(losses)}`",
+                f"Win rate: `{win_rate*100:.1f}%`",
+                f"Avg win:  `+${avg_win:.2f}`",
+                f"Avg loss: `\\-${avg_loss:.2f}`",
+                "",
+                f"Kelly E\\(V\\):   `{kelly_e:.4f}`",
+                f"Profit prob:  `{profit_prob:.1f}%`",
+                "",
+            ]
+        else:
+            lines += ["_No closed positions yet_", ""]
+
+        lines += [
+            f"ROI:          `{roi_sign}{roi:.2f}%`",
+            f"Initial:      `${portfolio.initial_balance_usd:.2f}`",
+            f"Current val:  `${total_value:.2f}`",
+            f"Open pos:     `{len(open_pos)}`",
+            "",
+            "_Shadow mode · Not financial advice_",
+        ]
+        return "\n".join(lines)
 
     def record_market_opened(self, user: User, market_id: int) -> None:
         variant = get_ab_variant_for_user(user_id=user.id)

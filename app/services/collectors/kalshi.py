@@ -14,6 +14,12 @@ class KalshiCollector(BaseCollector):
     def _parse_ts(value: str | None) -> datetime | None:
         if not value:
             return None
+        try:
+            token = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(token)
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _pick_float(row: dict, keys: tuple[str, ...]) -> float | None:
@@ -43,12 +49,6 @@ class KalshiCollector(BaseCollector):
         if any(token in blob for token in ("nba", "nfl", "mlb", "nhl", "soccer", "football", "match", "game")):
             return "sports"
         return "other"
-        try:
-            token = str(value).replace("Z", "+00:00")
-            dt = datetime.fromisoformat(token)
-            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-        except Exception:  # noqa: BLE001
-            return None
 
     def _headers(self) -> dict[str, str]:
         settings = get_settings()

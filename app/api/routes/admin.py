@@ -3,6 +3,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
 from app.db.session import get_db
+from app.services.dryrun.reporter import build_report as dryrun_build_report
+from app.services.dryrun.simulator import (
+    check_resolutions as dryrun_check_resolutions,
+    refresh_mark_prices as dryrun_refresh_mark_prices,
+    reset_portfolio as dryrun_reset_portfolio,
+    run_simulation_cycle as dryrun_run_cycle,
+)
 from app.services.research.signal_history_labeler import label_signal_history_from_snapshots
 from app.tasks.jobs import (
     analyze_markets_job,
@@ -100,3 +107,46 @@ def cleanup_signal_history(db: Session = Depends(get_db)) -> dict:
 @router.post("/provider-contract-checks", dependencies=[Depends(require_admin)])
 def provider_contract_checks(db: Session = Depends(get_db)) -> dict:
     return provider_contract_checks_job(db)
+
+
+# ---------------------------------------------------------------------------
+# Dry-run paper trading simulator
+# ---------------------------------------------------------------------------
+
+
+@router.post("/dryrun/run", dependencies=[Depends(require_admin)])
+def dryrun_run(db: Session = Depends(get_db)) -> dict:
+    """Run one simulation cycle: open new paper positions for qualifying signals."""
+    result = dryrun_run_cycle(db)
+    db.commit()
+    return result
+
+
+@router.get("/dryrun/report", dependencies=[Depends(require_admin)])
+def dryrun_report(db: Session = Depends(get_db)) -> dict:
+    """Return full dry-run portfolio report with stats and AI summary."""
+    return dryrun_build_report(db)
+
+
+@router.post("/dryrun/refresh-prices", dependencies=[Depends(require_admin)])
+def dryrun_refresh_prices(db: Session = Depends(get_db)) -> dict:
+    """Refresh CLOB mark prices for all open dry-run positions."""
+    result = dryrun_refresh_mark_prices(db)
+    db.commit()
+    return result
+
+
+@router.post("/dryrun/check-resolutions", dependencies=[Depends(require_admin)])
+def dryrun_check_res(db: Session = Depends(get_db)) -> dict:
+    """Close dry-run positions for markets that are now resolved."""
+    result = dryrun_check_resolutions(db)
+    db.commit()
+    return result
+
+
+@router.post("/dryrun/reset", dependencies=[Depends(require_admin)])
+def dryrun_reset(db: Session = Depends(get_db)) -> dict:
+    """Reset dry-run portfolio to initial $100 balance."""
+    portfolio = dryrun_reset_portfolio(db)
+    db.commit()
+    return {"reset": True, "cash_usd": portfolio.current_cash_usd}

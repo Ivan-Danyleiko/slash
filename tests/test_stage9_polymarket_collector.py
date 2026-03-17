@@ -35,8 +35,8 @@ def test_polymarket_clob_enabled_with_bid_ask_uses_clob_mode(monkeypatch) -> Non
                     }
                 ],
             )
-        if "/order-book/token-1" in str(url):
-            return _FakeResponse(200, {"bids": [[0.60, 10]], "asks": [[0.62, 8]]})
+        if "/book" in str(url):
+            return _FakeResponse(200, {"bids": [{"price": "0.60", "size": "10"}], "asks": [{"price": "0.62", "size": "8"}]})
         return _FakeResponse(404, {})
 
     monkeypatch.setattr("app.services.collectors.polymarket.httpx.get", _fake_get)
