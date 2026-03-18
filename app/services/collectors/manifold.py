@@ -36,17 +36,34 @@ class ManifoldCollector(BaseCollector):
     def fetch_markets(self) -> list[NormalizedMarketDTO]:
         settings = get_settings()
         url = f"{settings.manifold_api_base_url}/markets"
-        resp = retry_request(
-            lambda: httpx.get(url, params={"limit": 500}, timeout=15.0),
-            retries=3,
-            backoff_seconds=1.0,
-            platform=self.platform_name,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        page_size = 500
+        max_rows = 3000
+        data: list[dict] = []
+        before_id: str | None = None
+
+        while len(data) < max_rows:
+            params: dict = {"limit": page_size, "sort": "created-time", "order": "desc"}
+            if before_id:
+                params["before"] = before_id
+            resp = retry_request(
+                lambda: httpx.get(url, params=params, timeout=15.0),  # noqa: B023
+                retries=3,
+                backoff_seconds=1.0,
+                platform=self.platform_name,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if not page:
+                break
+            data.extend(page)
+            if len(page) < page_size:
+                break
+            before_id = str(page[-1].get("id") or "")
+            if not before_id:
+                break
 
         items: list[NormalizedMarketDTO] = []
-        for row in data[:500]:
+        for row in data:
             # Stage 9: only open, binary-compatible markets for cleaner execution research.
             if bool(row.get("isResolved")):
                 continue

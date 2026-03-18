@@ -129,18 +129,21 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
             with urllib_request.urlopen(req, timeout=15.0) as resp:  # nosec B310
                 result = json.loads(resp.read().decode("utf-8"))
             text = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-            # Parse JSON array from response
+            # Parse JSON array — accept [1, 2, 3] or [1 2 3] formats
             import re
             match = re.search(r"\[[\d\s,]*\]", text)
             if match:
-                approved_ids = json.loads(match.group(0))
-                logger.info("LLM borderline review approved %d/%d: %s", len(approved_ids), len(candidates), approved_ids)
-                return set(int(x) for x in approved_ids if isinstance(x, (int, float)))
+                approved_ids = json.loads(match.group(0).replace(" ", ",").replace(",,", ","))
+                approved = set(int(x) for x in approved_ids if isinstance(x, (int, float)))
+                logger.info("LLM borderline review via %s: approved %d/%d signals: %s", api_base, len(approved), len(candidates), approved)
+                return approved
+            logger.warning("LLM borderline review via %s: no JSON array in response: %r", api_base, text[:200])
             return set()
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM borderline review failed (%s): %s", api_base, exc)
             continue
 
+    logger.warning("LLM borderline review: all providers failed, skipping %d candidates", len(candidates))
     return set()
 
 
@@ -566,7 +569,12 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         if direction not in ("YES", "NO"):
             direction = "YES"
 
-        entry_price = float(market.best_ask_yes) if direction == "YES" else (1.0 - float(market.best_ask_yes))
+        # YES: pay the ask price. NO: NO ask = 1 - YES bid (not 1 - YES ask)
+        if direction == "YES":
+            entry_price = float(market.best_ask_yes)
+        else:
+            yes_bid = float(market.best_bid_yes) if market.best_bid_yes is not None else float(market.best_ask_yes)
+            entry_price = 1.0 - yes_bid
         if entry_price <= 0.0 or entry_price >= 1.0:
             skipped += 1
             continue
@@ -695,10 +703,11 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
             pos.unrealized_pnl_usd = 0.0
             continue
 
-        # Time-exit: held too long with low remaining EV
+        # Time-exit: held too long with little movement (capital is stuck)
         days_held = (now - pos.opened_at).total_seconds() / 86400.0 if pos.opened_at else 0.0
-        ev_remaining = pos.entry_ev_pct or 0.0
-        if days_held >= TIME_EXIT_DAYS and ev_remaining < TIME_EXIT_MIN_EV:
+        # ev_remaining = current unrealized P&L as % of notional (how much we're actually gaining)
+        ev_remaining = pos.unrealized_pnl_usd / pos.notional_usd if pos.notional_usd > 0 else 0.0
+        if days_held >= TIME_EXIT_DAYS and abs(ev_remaining) < TIME_EXIT_MIN_EV:
             _close_pos("time_exit")
             total_unrealized -= pos.unrealized_pnl_usd
             pos.unrealized_pnl_usd = 0.0

@@ -20,11 +20,6 @@ from app.tasks.jobs import (
     stage7_evaluate_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
-    label_signal_history_1h_job,
-    label_signal_history_15m_job,
-    label_signal_history_30m_job,
-    label_signal_history_6h_job,
-    label_signal_history_24h_job,
     label_signal_history_job,
     label_signal_history_resolution_job,
     provider_contract_checks_job,
@@ -33,15 +28,36 @@ from app.tasks.jobs import (
     update_watchlists_job,
 )
 
+# ---------------------------------------------------------------------------
+# Shared task decorator defaults
+# ---------------------------------------------------------------------------
 
-@celery_app.task(
-    name="sync_all_platforms",
-    autoretry_for=(Exception,),
-    max_retries=2,
-    retry_backoff=True,
-    retry_backoff_max=120,
-    retry_jitter=True,
-)
+_RETRY = {
+    "autoretry_for": (Exception,),
+    "max_retries": 2,
+    "retry_backoff": True,
+    "retry_backoff_max": 120,
+    "retry_jitter": True,
+}
+
+
+def _db_task(job_fn):
+    """Run a job function with a fresh DB session."""
+    def wrapper(*args, **kwargs):
+        db = SessionLocal()
+        try:
+            return job_fn(db, *args, **kwargs)
+        finally:
+            db.close()
+    wrapper.__name__ = job_fn.__name__
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Task definitions
+# ---------------------------------------------------------------------------
+
+@celery_app.task(name="sync_all_platforms", **_RETRY)
 def sync_all_platforms_task() -> dict:
     db = SessionLocal()
     try:
@@ -50,7 +66,7 @@ def sync_all_platforms_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="analyze_markets")
+@celery_app.task(name="analyze_markets", **_RETRY)
 def analyze_markets_task() -> dict:
     db = SessionLocal()
     try:
@@ -59,7 +75,7 @@ def analyze_markets_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="detect_duplicates")
+@celery_app.task(name="detect_duplicates", **_RETRY)
 def detect_duplicates_task() -> dict:
     db = SessionLocal()
     try:
@@ -68,7 +84,7 @@ def detect_duplicates_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="analyze_rules")
+@celery_app.task(name="analyze_rules", **_RETRY)
 def analyze_rules_task() -> dict:
     db = SessionLocal()
     try:
@@ -77,7 +93,7 @@ def analyze_rules_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="detect_divergence")
+@celery_app.task(name="detect_divergence", **_RETRY)
 def detect_divergence_task() -> dict:
     db = SessionLocal()
     try:
@@ -86,7 +102,7 @@ def detect_divergence_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="generate_signals")
+@celery_app.task(name="generate_signals", **_RETRY)
 def generate_signals_task() -> dict:
     db = SessionLocal()
     try:
@@ -95,7 +111,7 @@ def generate_signals_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="daily_digest")
+@celery_app.task(name="daily_digest", **_RETRY)
 def daily_digest_task() -> dict:
     db = SessionLocal()
     try:
@@ -104,7 +120,7 @@ def daily_digest_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="signal_push")
+@celery_app.task(name="signal_push", **_RETRY)
 def signal_push_task() -> dict:
     db = SessionLocal()
     try:
@@ -113,7 +129,7 @@ def signal_push_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="cleanup_old_signals")
+@celery_app.task(name="cleanup_old_signals", **_RETRY)
 def cleanup_old_signals_task() -> dict:
     db = SessionLocal()
     try:
@@ -122,7 +138,7 @@ def cleanup_old_signals_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="update_watchlists")
+@celery_app.task(name="update_watchlists", **_RETRY)
 def update_watchlists_task() -> dict:
     db = SessionLocal()
     try:
@@ -131,7 +147,7 @@ def update_watchlists_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="quality_snapshot")
+@celery_app.task(name="quality_snapshot", **_RETRY)
 def quality_snapshot_task() -> dict:
     db = SessionLocal()
     try:
@@ -140,52 +156,8 @@ def quality_snapshot_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="label_signal_history_1h")
-def label_signal_history_1h_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_1h_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history_15m")
-def label_signal_history_15m_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_15m_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history_30m")
-def label_signal_history_30m_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_30m_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history_6h")
-def label_signal_history_6h_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_6h_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history_24h")
-def label_signal_history_24h_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_24h_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history")
+# Labeling: single batched task covers all horizons (15m/30m/1h/6h/24h)
+@celery_app.task(name="label_signal_history", **_RETRY)
 def label_signal_history_task() -> dict:
     db = SessionLocal()
     try:
@@ -194,7 +166,7 @@ def label_signal_history_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="label_signal_history_resolution")
+@celery_app.task(name="label_signal_history_resolution", **_RETRY)
 def label_signal_history_resolution_task() -> dict:
     db = SessionLocal()
     try:
@@ -203,7 +175,7 @@ def label_signal_history_resolution_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="cleanup_signal_history")
+@celery_app.task(name="cleanup_signal_history", **_RETRY)
 def cleanup_signal_history_task() -> dict:
     db = SessionLocal()
     try:
@@ -212,7 +184,7 @@ def cleanup_signal_history_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="provider_contract_checks")
+@celery_app.task(name="provider_contract_checks", **_RETRY)
 def provider_contract_checks_task() -> dict:
     db = SessionLocal()
     try:
@@ -221,14 +193,7 @@ def provider_contract_checks_task() -> dict:
         db.close()
 
 
-@celery_app.task(
-    name="stage7_evaluate",
-    autoretry_for=(Exception,),
-    max_retries=2,
-    retry_backoff=True,
-    retry_backoff_max=120,
-    retry_jitter=True,
-)
+@celery_app.task(name="stage7_evaluate", **_RETRY)
 def stage7_evaluate_task() -> dict:
     db = SessionLocal()
     try:
@@ -237,7 +202,7 @@ def stage7_evaluate_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage8_shadow_ledger")
+@celery_app.task(name="stage8_shadow_ledger", **_RETRY)
 def stage8_shadow_ledger_task() -> dict:
     db = SessionLocal()
     try:
@@ -246,7 +211,7 @@ def stage8_shadow_ledger_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage8_final_report")
+@celery_app.task(name="stage8_final_report", **_RETRY)
 def stage8_final_report_task() -> dict:
     db = SessionLocal()
     try:
@@ -255,7 +220,7 @@ def stage8_final_report_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage9_track")
+@celery_app.task(name="stage9_track", **_RETRY)
 def stage9_track_task() -> dict:
     db = SessionLocal()
     try:
@@ -264,7 +229,7 @@ def stage9_track_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage10_track")
+@celery_app.task(name="stage10_track", **_RETRY)
 def stage10_track_task() -> dict:
     db = SessionLocal()
     try:
@@ -273,7 +238,7 @@ def stage10_track_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage10_timeline_backfill")
+@celery_app.task(name="stage10_timeline_backfill", **_RETRY)
 def stage10_timeline_backfill_task() -> dict:
     db = SessionLocal()
     try:
@@ -282,7 +247,7 @@ def stage10_timeline_backfill_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage11_track")
+@celery_app.task(name="stage11_track", **_RETRY)
 def stage11_track_task() -> dict:
     db = SessionLocal()
     try:
@@ -291,7 +256,7 @@ def stage11_track_task() -> dict:
         db.close()
 
 
-@celery_app.task(name="stage11_reconcile")
+@celery_app.task(name="stage11_reconcile", **_RETRY)
 def stage11_reconcile_task() -> dict:
     db = SessionLocal()
     try:
@@ -300,45 +265,106 @@ def stage11_reconcile_task() -> dict:
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Beat schedule
+# ---------------------------------------------------------------------------
+
 celery_app.conf.beat_schedule = {
+    # Core data pipeline — staggered to avoid DB contention
     "sync-platforms-every-15-min": {
         "task": "sync_all_platforms",
         "schedule": crontab(minute="*/15"),
     },
     "analyze-markets-every-15-min": {
         "task": "analyze_markets",
-        "schedule": crontab(minute="2-59/15"),
+        "schedule": crontab(minute="2-59/15"),  # +2min offset after sync
     },
     "detect-duplicates-every-2h": {
         "task": "detect_duplicates",
         "schedule": crontab(minute=5, hour="*/2"),
     },
-    "analyze-rules-every-20-min": {"task": "analyze_rules", "schedule": crontab(minute="*/20")},
-    "detect-divergence-every-20-min": {"task": "detect_divergence", "schedule": crontab(minute="*/20")},
-    "generate-signals-every-20-min": {"task": "generate_signals", "schedule": crontab(minute="*/20")},
-    "update-watchlists-hourly": {"task": "update_watchlists", "schedule": crontab(minute=0)},
-    "signal-push-every-30-min": {"task": "signal_push", "schedule": crontab(minute="*/30")},
-    "daily-digest-once-day": {"task": "daily_digest", "schedule": crontab(hour=9, minute=0)},
-    "quality-snapshot-daily": {"task": "quality_snapshot", "schedule": crontab(hour=0, minute=10)},
-    "label-signal-history-15m-every-15-min": {"task": "label_signal_history_15m", "schedule": crontab(minute="*/15")},
-    "label-signal-history-30m-every-30-min": {"task": "label_signal_history_30m", "schedule": crontab(minute="*/30")},
-    "label-signal-history-1h-hourly": {"task": "label_signal_history_1h", "schedule": crontab(minute=12)},
-    "label-signal-history-6h": {"task": "label_signal_history_6h", "schedule": crontab(hour="*/6", minute=18)},
-    "label-signal-history-24h": {"task": "label_signal_history_24h", "schedule": crontab(hour=1, minute=25)},
-    "label-signal-history-daily": {"task": "label_signal_history", "schedule": crontab(hour=2, minute=0)},
+    "analyze-rules-every-20-min": {
+        "task": "analyze_rules",
+        "schedule": crontab(minute="4-59/20"),  # +4min offset after sync
+    },
+    "detect-divergence-every-20-min": {
+        "task": "detect_divergence",
+        "schedule": crontab(minute="6-59/20"),  # +6min offset
+    },
+    "generate-signals-every-20-min": {
+        "task": "generate_signals",
+        "schedule": crontab(minute="8-59/20"),  # +8min offset, after divergence
+    },
+    # User-facing
+    "update-watchlists-hourly": {
+        "task": "update_watchlists",
+        "schedule": crontab(minute=0),
+    },
+    "signal-push-every-30-min": {
+        "task": "signal_push",
+        "schedule": crontab(minute="*/30"),
+    },
+    "daily-digest-once-day": {
+        "task": "daily_digest",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    # Research / labeling — single batched job replaces 5 separate ones
+    "label-signal-history-every-15-min": {
+        "task": "label_signal_history",
+        "schedule": crontab(minute="*/15"),
+    },
     "label-signal-history-resolution-hourly": {
         "task": "label_signal_history_resolution",
         "schedule": crontab(minute=10),
     },
-    "cleanup-old-signals-nightly": {"task": "cleanup_old_signals", "schedule": crontab(hour=3, minute=0)},
-    "cleanup-signal-history-nightly": {"task": "cleanup_signal_history", "schedule": crontab(hour=3, minute=20)},
-    "provider-contract-checks-hourly": {"task": "provider_contract_checks", "schedule": crontab(minute=40)},
-    "stage7-evaluate-every-30-min": {"task": "stage7_evaluate", "schedule": crontab(minute="*/30")},
-    "stage8-shadow-ledger-daily": {"task": "stage8_shadow_ledger", "schedule": crontab(hour=2, minute=45)},
-    "stage8-final-report-daily": {"task": "stage8_final_report", "schedule": crontab(hour=2, minute=55)},
-    "stage9-track-daily": {"task": "stage9_track", "schedule": crontab(hour=3, minute=5)},
-    "stage10-timeline-backfill-daily": {"task": "stage10_timeline_backfill", "schedule": crontab(hour=3, minute=10)},
-    "stage10-track-daily": {"task": "stage10_track", "schedule": crontab(hour=3, minute=15)},
-    "stage11-reconcile-every-10-min": {"task": "stage11_reconcile", "schedule": crontab(minute="*/10")},
-    "stage11-track-daily": {"task": "stage11_track", "schedule": crontab(hour=3, minute=25)},
+    # Maintenance
+    "quality-snapshot-daily": {
+        "task": "quality_snapshot",
+        "schedule": crontab(hour=0, minute=10),
+    },
+    "cleanup-old-signals-nightly": {
+        "task": "cleanup_old_signals",
+        "schedule": crontab(hour=3, minute=0),
+    },
+    "cleanup-signal-history-nightly": {
+        "task": "cleanup_signal_history",
+        "schedule": crontab(hour=3, minute=20),
+    },
+    "provider-contract-checks-hourly": {
+        "task": "provider_contract_checks",
+        "schedule": crontab(minute=40),
+    },
+    # Stage pipeline
+    "stage7-evaluate-every-30-min": {
+        "task": "stage7_evaluate",
+        "schedule": crontab(minute="*/30"),
+    },
+    "stage8-shadow-ledger-daily": {
+        "task": "stage8_shadow_ledger",
+        "schedule": crontab(hour=2, minute=45),
+    },
+    "stage8-final-report-daily": {
+        "task": "stage8_final_report",
+        "schedule": crontab(hour=2, minute=55),
+    },
+    "stage9-track-daily": {
+        "task": "stage9_track",
+        "schedule": crontab(hour=3, minute=5),
+    },
+    "stage10-timeline-backfill-daily": {
+        "task": "stage10_timeline_backfill",
+        "schedule": crontab(hour=3, minute=10),
+    },
+    "stage10-track-daily": {
+        "task": "stage10_track",
+        "schedule": crontab(hour=3, minute=15),
+    },
+    "stage11-reconcile-every-10-min": {
+        "task": "stage11_reconcile",
+        "schedule": crontab(minute="*/10"),
+    },
+    "stage11-track-daily": {
+        "task": "stage11_track",
+        "schedule": crontab(hour=3, minute=25),
+    },
 }

@@ -101,6 +101,9 @@ def _finish_job(db: Session, job: JobRun, status: str, details: dict) -> None:
 
 
 def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
+    _cleanup_stale_running_jobs(db, job_name="sync_all_platforms", stale_minutes=20)
+    if _is_recent_running_job(db, job_name="sync_all_platforms", stale_minutes=20):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "sync_all_platforms")
     try:
         result = CollectorSyncService(db).sync_all(platform=platform)
@@ -140,6 +143,9 @@ def detect_duplicates_job(db: Session) -> dict:
 
 
 def analyze_rules_job(db: Session) -> dict:
+    _cleanup_stale_running_jobs(db, job_name="analyze_rules", stale_minutes=25)
+    if _is_recent_running_job(db, job_name="analyze_rules", stale_minutes=25):
+        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, "analyze_rules")
     try:
         result = SignalEngine(db).analyze_rules()
