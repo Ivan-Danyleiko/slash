@@ -125,21 +125,15 @@ class PolymarketCollector(BaseCollector):
         except Exception:  # noqa: BLE001
             return None, None, "clob_request_failed"
 
-    def fetch_markets(self) -> list[NormalizedMarketDTO]:
-        settings = get_settings()
-        url = f"{settings.polymarket_api_base_url}/markets"
-        # Fetch up to 10000 active markets sorted by end date (nearest first)
+    def _fetch_pages(self, url: str, extra_params: dict, max_rows: int = 10000) -> list[dict]:
+        """Fetch paginated markets from Gamma API."""
         rows: list[dict] = []
-        offset = 0
         page_size = 100
-        while len(rows) < 10000:
+        offset = 0
+        while len(rows) < max_rows:
+            params = {"limit": page_size, "offset": offset, "active": "true", "closed": "false", **extra_params}
             resp = retry_request(
-                lambda: httpx.get(url, params={  # noqa: B023
-                    "limit": page_size,
-                    "offset": offset,
-                    "active": "true",
-                    "closed": "false",
-                }, timeout=20.0),
+                lambda: httpx.get(url, params=params, timeout=20.0),  # noqa: B023
                 retries=3,
                 backoff_seconds=1.0,
                 platform=self.platform_name,
@@ -152,6 +146,32 @@ class PolymarketCollector(BaseCollector):
             if len(page) < page_size:
                 break
             offset += page_size
+        return rows
+
+    def fetch_markets(self) -> list[NormalizedMarketDTO]:
+        settings = get_settings()
+        url = f"{settings.polymarket_api_base_url}/markets"
+
+        # Pass 1: popular/liquid markets (default API order)
+        rows_popular = self._fetch_pages(url, {})
+
+        # Pass 2: near-term markets closing in next 60 days (sorted by end date ascending)
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        end_soon = (now + timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            rows_near = self._fetch_pages(url, {"end_date_max": end_soon, "order": "end_date_iso", "ascending": "true"}, max_rows=500)
+        except Exception:  # noqa: BLE001
+            rows_near = []
+
+        # Merge, deduplicate by market id
+        seen: set[str] = set()
+        rows: list[dict] = []
+        for row in rows_popular + rows_near:
+            mid = str(row.get("id") or "")
+            if mid and mid not in seen:
+                seen.add(mid)
+                rows.append(row)
 
         markets: list[NormalizedMarketDTO] = []
         for row in rows:
@@ -169,7 +189,7 @@ class PolymarketCollector(BaseCollector):
             # (> $500) to avoid 500 sequential HTTP calls per sync cycle.
             clob_eligible = (
                 settings.polymarket_clob_enabled
-                and float(row.get("liquidityNum") or row.get("liquidity") or 0) >= 500
+                and float(row.get("liquidityNum") or row.get("liquidity") or 0) >= 100
             )
             if clob_eligible:
                 token_id = self._extract_token_id(row)
