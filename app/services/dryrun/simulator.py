@@ -272,7 +272,19 @@ def _estimate_our_prob_yes(signal: Signal, s7: Stage7AgentDecision, market: Mark
 
     if str(signal.signal_mode or "").lower() == "momentum":
         current = float(market.probability_yes or 0.5)
-        move = float(meta.get("price_move") or 0.0)
+        signed_recent = meta.get("signed_recent_move")
+        recent_move = meta.get("recent_move")
+        price_move = meta.get("price_move")
+
+        move: float = 0.0
+        if isinstance(signed_recent, (int, float)):
+            move = float(signed_recent)
+        elif isinstance(price_move, (int, float)):
+            move = float(price_move)
+        elif isinstance(recent_move, (int, float)):
+            inferred_sign = 1.0 if str(signal.signal_direction or "YES").upper() == "YES" else -1.0
+            move = float(recent_move) * inferred_sign
+
         # Empirical mean-reversion edge from inverted-momentum backtest.
         sign = 1.0 if move >= 0 else -1.0
         return min(0.95, max(0.05, current - sign * MOMENTUM_CONTRARIAN_EDGE))
