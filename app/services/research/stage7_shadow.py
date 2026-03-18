@@ -5,7 +5,7 @@ import logging
 from math import log, sqrt
 import random
 from statistics import quantiles
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 from types import SimpleNamespace
 
@@ -287,7 +287,7 @@ def build_stage7_shadow_report(
                     provider=provider_key,
                     model_id="stage7_verifier",
                     model_version="v1",
-                    prompt_template_version="stage7_prompt_v1",
+                    prompt_template_version="stage7_prompt_v2",
                     provider_fingerprint="deterministic_local",
                 )
             span_decision_ms = (perf_counter() - span_decision_start) * 1000.0
@@ -307,7 +307,7 @@ def build_stage7_shadow_report(
                     "input_hash": str(composed.get("input_hash") or ""),
                     "model_id": "stage7_verifier",
                     "model_version": "v1",
-                    "prompt_template_version": "stage7_prompt_v1",
+                    "prompt_template_version": "stage7_prompt_v2",
                     "provider": provider_key,
                     "provider_fingerprint": "deterministic_local",
                     "llm_cost_usd": 0.0,
@@ -324,7 +324,7 @@ def build_stage7_shadow_report(
                     "input_hash": str(composed.get("input_hash") or ""),
                     "model_id": "stage7_verifier",
                     "model_version": "v1",
-                    "prompt_template_version": "stage7_prompt_v1",
+                    "prompt_template_version": "stage7_prompt_v2",
                     "provider": provider_key,
                     "provider_fingerprint": "deterministic_local",
                     "llm_cost_usd": 0.0,
@@ -333,13 +333,61 @@ def build_stage7_shadow_report(
             else:
                 llm_calls += 1
                 llm_spend_run += call_cost_usd
+                _ev_pct = float(base_row.get("expected_ev_pct") or 0.0)
+                _ims = (evidence.get("internal_metrics_snapshot") or {})
+                _snap = _ims.get("market_snapshot") or {}
+                _mprob = float(_snap.get("probability") or 0.5)
+                _mprob = min(0.99, max(0.01, _mprob))
+                _kelly_raw = _ev_pct / (_mprob * (1.0 - _mprob)) if _mprob not in (0.0, 1.0) else 0.0
+                _kelly = round(max(0.0, min(0.25, _kelly_raw)), 4)
+                _hist_m = _ims.get("signal_history_metrics") or {}
+                _cons = evidence.get("external_consensus") or {}
+                _known_probs = [
+                    p for p in [
+                        _cons.get("polymarket_prob"),
+                        _cons.get("manifold_prob"),
+                        _cons.get("metaculus_median"),
+                    ] if isinstance(p, (int, float))
+                ]
+                _cons_spread = round(max(_known_probs) - min(_known_probs), 4) if len(_known_probs) >= 2 else 0.0
+                _wf = _ims.get("research_decision") or {}
+                _resolution_time = _snap.get("resolution_time")
+                _days_to_res = -1
+                if _resolution_time:
+                    try:
+                        from datetime import timezone
+                        _res_dt = datetime.fromisoformat(str(_resolution_time).replace("Z", "+00:00"))
+                        _days_to_res = max(-1, (_res_dt - datetime.now(UTC)).days)
+                    except Exception:
+                        pass
                 adapter_input = Stage7AdapterInput(
                     signal_id=sid,
                     base_decision=str(base_row.get("decision") or "SKIP"),
                     internal_gate_passed=bool(gate.get("passed")),
                     contradictions_count=len(list(evidence.get("contradictions") or [])),
                     ambiguity_count=len(list(evidence.get("resolution_ambiguity_flags") or [])),
+                    expected_ev_pct=_ev_pct,
+                    kelly_fraction=_kelly,
+                    market_prob=_mprob,
+                    divergence_score=float(base_row.get("divergence") or 0.0),
+                    liquidity_score=float(base_row.get("liquidity") or 0.0),
+                    win_rate_90d=float(_hist_m.get("hit_rate") or 0.0),
+                    avg_win_90d=float(_hist_m.get("avg_win") or 0.0),
+                    avg_loss_90d=float(_hist_m.get("avg_loss") or 0.0),
+                    n_samples_90d=int(_hist_m.get("n_samples") or 0),
+                    is_shadow_mode=True,
+                    signal_type=str(base_row.get("signal_type") or ""),
+                    market_title=str(_snap.get("title") or "")[:120],
+                    platform=str(_snap.get("platform") or ""),
+                    days_to_resolution=_days_to_res,
+                    consensus_spread=_cons_spread,
+                    consensus_platforms=len(_known_probs),
+                    walk_forward_verdict=str(_wf.get("walk_forward_verdict") or "UNKNOWN"),
                 )
+                # Rate limiting: free-tier APIs allow ~20 req/min (Gemini) / 30 req/min (Groq).
+                # Sleep 3s between LLM calls to stay under the tighter limit.
+                if llm_calls > 1:
+                    sleep(3.0)
                 with stage7_span("stage7.shadow.adapter_decide"):
                     adapter_out = adapter.decide(adapter_input)
                 composed["decision"] = str(adapter_out.get("decision") or composed.get("decision") or "SKIP")
@@ -365,7 +413,7 @@ def build_stage7_shadow_report(
                 provider=provider_key,
                 model_id="stage7_verifier",
                 model_version="v1",
-                prompt_template_version="stage7_prompt_v1",
+                prompt_template_version="stage7_prompt_v2",
                 provider_fingerprint="deterministic_local",
             )
         stability_total += 1

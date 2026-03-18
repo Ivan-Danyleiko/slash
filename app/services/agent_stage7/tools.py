@@ -94,8 +94,9 @@ def get_signal_context(db: Session, signal_id: int) -> dict[str, Any]:
             .order_by(SignalHistory.timestamp.desc())
             .limit(1)
         )
-        confidence = min(0.95, max(0.05, float((hist.liquidity if hist else 0.0) or 0.0)))
         liquidity = float((hist.liquidity if hist else 0.0) or 0.0)
+        # Use signal.confidence_score when available; fall back to liquidity as proxy.
+        confidence = min(0.95, max(0.05, float(getattr(signal, "confidence_score", None) or liquidity or 0.5)))
         ev_v2 = float((hist.divergence if hist else 0.0) or 0.0) * 0.20
         return {
             "signal_id": int(signal.id),

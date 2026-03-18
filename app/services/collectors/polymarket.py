@@ -152,8 +152,8 @@ class PolymarketCollector(BaseCollector):
         settings = get_settings()
         url = f"{settings.polymarket_api_base_url}/markets"
 
-        # Pass 1: popular/liquid markets (default API order)
-        rows_popular = self._fetch_pages(url, {})
+        # Pass 1: popular/liquid markets (default API order), cap at 3000 to limit CLOB calls
+        rows_popular = self._fetch_pages(url, {}, max_rows=3000)
 
         # Pass 2: near-term markets closing in next 60 days (sorted by end date ascending)
         from datetime import timedelta
@@ -185,11 +185,11 @@ class PolymarketCollector(BaseCollector):
             if isinstance(row.get("notionalValue"), (int, float)):
                 payload["notionalValueDollars"] = row.get("notionalValue")
 
-            # Stage 9 CLOB mode: fetch real bid/ask only for markets with real liquidity
-            # (> $500) to avoid 500 sequential HTTP calls per sync cycle.
+            # Stage 9 CLOB mode: fetch real bid/ask only for markets with substantial liquidity
+            # ($1000+) to cap sequential CLOB HTTP calls per sync cycle.
             clob_eligible = (
                 settings.polymarket_clob_enabled
-                and float(row.get("liquidityNum") or row.get("liquidity") or 0) >= 100
+                and float(row.get("liquidityNum") or row.get("liquidity") or 0) >= 1000
             )
             if clob_eligible:
                 token_id = self._extract_token_id(row)

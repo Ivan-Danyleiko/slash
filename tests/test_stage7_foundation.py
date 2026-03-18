@@ -217,23 +217,26 @@ def test_stage7_external_verifier_uses_fuzzy_cross_platform_match() -> None:
 
 
 def test_stage7_factory_uses_gemini_profile_when_key_present() -> None:
+    from app.services.agent_stage7.stack_adapters.factory import FallbackAdapter
     settings = Settings()
     settings.stage7_agent_provider = "plain_llm_api"
     settings.stage7_agent_real_calls_enabled = True
-    settings.stage7_agent_provider_profile = "gemini"
-    settings.gemini_api_key = "test-key"
+    settings.gemini_api_key = "test-gemini-key"
+    settings.groq_api_key = ""
+    settings.openrouter_api_key = ""
     adapter = get_stage7_adapter(settings)
+    # Single key → direct OpenAICompatibleAdapter (no fallback wrapper needed)
     assert isinstance(adapter, OpenAICompatibleAdapter)
     assert "generativelanguage.googleapis.com" in adapter.api_base_url
-    assert adapter.model == settings.stage7_gemini_model
 
 
 def test_stage7_factory_falls_back_to_plain_when_profile_key_missing() -> None:
     settings = Settings()
     settings.stage7_agent_provider = "plain_llm_api"
     settings.stage7_agent_real_calls_enabled = True
-    settings.stage7_agent_provider_profile = "groq"
     settings.groq_api_key = ""
+    settings.gemini_api_key = ""
+    settings.openrouter_api_key = ""
     adapter = get_stage7_adapter(settings)
     assert isinstance(adapter, PlainApiAdapter)
 

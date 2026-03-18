@@ -2,6 +2,11 @@
 
 Prediction Market Scanner is a market-intelligence backend for prediction markets. It is **not** a trading bot.
 
+## Server
+- **IPv4**: `173.242.53.177`
+- **IPv6**: `2a00:7a60:0:35b1::2`
+- SSH: `ssh root@173.242.53.177`
+
 ## Documentation
 - Full technical docs are in [`docs/`](./docs/README.md).
 
