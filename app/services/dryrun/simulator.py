@@ -33,7 +33,13 @@ INITIAL_BALANCE = 100.0
 MIN_POSITION_PCT = 0.03
 MAX_POSITION_PCT = 0.05
 MIN_NOTIONAL_USD = 1.0
-STOP_LOSS_RATIO = 0.50  # close if mark_price < entry * 0.50
+STOP_LOSS_RATIO = 0.50        # close if mark drops 50% from entry
+TAKE_PROFIT_RATIO = 0.65      # close when 65% of max gain is captured
+TIME_EXIT_DAYS = 14           # exit if held this many days with low EV
+TIME_EXIT_MIN_EV = 0.03       # EV threshold below which time-exit triggers
+MAX_DAYS_TO_RESOLUTION = 90   # skip markets resolving in more than N days
+MIN_VOLUME_USD = 50_000       # skip markets with total volume < $50k
+MAX_SPREAD_PCT = 0.04         # skip markets with bid-ask spread > 4%
 
 
 # ---------------------------------------------------------------------------
@@ -208,26 +214,57 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
 
     now = datetime.now(UTC)
 
+    # Build candidate list with computed metrics for smart sorting
+    candidates: list[tuple[Signal, Stage7AgentDecision, Market, float, float, float]] = []
     for signal, s7, market in rows:
         if market.id in open_market_ids:
             skipped += 1
             continue
 
-        direction = str(signal.signal_direction or "YES").upper()
-        if direction not in ("YES", "NO"):
-            direction = "YES"
+        # --- Spread filter ---
+        spread_pct = 0.0
+        if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
+            spread_pct = (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes)
+        elif market.spread_cents is not None:
+            mid = ((market.best_bid_yes or 0) + (market.best_ask_yes or 0)) / 2 or 0.5
+            spread_pct = float(market.spread_cents) / 100.0 / mid
+        if spread_pct > MAX_SPREAD_PCT:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: spread {spread_pct:.1%} > max {MAX_SPREAD_PCT:.0%}")
+            continue
+
+        # --- Volume filter ---
+        volume = float(market.notional_value_dollars or market.liquidity_value or 0.0)
+        if volume < MIN_VOLUME_USD:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: volume ${volume:.0f} < min ${MIN_VOLUME_USD:.0f}")
+            continue
+
+        # --- Time-to-resolution filter ---
+        days_to_res = 999.0
+        if market.resolution_time:
+            days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
+        if days_to_res > MAX_DAYS_TO_RESOLUTION:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: {days_to_res:.0f}d to resolution > max {MAX_DAYS_TO_RESOLUTION}d")
+            continue
 
         ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
         kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
         ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
-
-        # Fallback: use confidence_score as EV proxy so we always open something
         if ev_pct <= 0.0 and signal.confidence_score:
-            ev_pct = float(signal.confidence_score) * 0.05  # conservative proxy
+            ev_pct = float(signal.confidence_score) * 0.05
 
+        # Daily EV = edge per day of capital lock — key sorting metric
+        daily_ev = ev_pct / days_to_res
+        candidates.append((signal, s7, market, kelly, ev_pct, daily_ev))
+
+    # Sort by daily_ev descending — best return per day of capital lock first
+    candidates.sort(key=lambda x: x[5], reverse=True)
+
+    for signal, s7, market, kelly, ev_pct, daily_ev in candidates:
         position_pct = _compute_position_pct(kelly, ev_pct)
         if position_pct is None:
-            # Last resort: always allocate min size for dry-run learning
             position_pct = MIN_POSITION_PCT
 
         notional = portfolio.current_cash_usd * position_pct
@@ -236,11 +273,16 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             reasons.append(f"signal {signal.id}: notional ${notional:.2f} < min ${MIN_NOTIONAL_USD}")
             continue
 
+        direction = str(signal.signal_direction or "YES").upper()
+        if direction not in ("YES", "NO"):
+            direction = "YES"
+
         entry_price = float(market.best_ask_yes) if direction == "YES" else (1.0 - float(market.best_ask_yes))
         if entry_price <= 0.0 or entry_price >= 1.0:
             skipped += 1
             continue
 
+        days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0) if market.resolution_time else 999.0
         shares = notional / entry_price
 
         pos = DryrunPosition(
@@ -254,7 +296,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             notional_usd=notional,
             shares_count=shares,
             status="OPEN",
-            open_reason=f"kelly={kelly:.4f},ev={ev_pct:.4f},stage7=KEEP",
+            open_reason=f"kelly={kelly:.4f},ev={ev_pct:.4f},daily_ev={daily_ev:.5f},stage7=KEEP",
             entry_kelly_fraction=kelly,
             entry_ev_pct=ev_pct,
             unrealized_pnl_usd=0.0,
@@ -339,17 +381,37 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
         updated += 1
         total_unrealized += pos.unrealized_pnl_usd
 
-        # Stop-loss check
-        if new_mark < pos.entry_price * STOP_LOSS_RATIO:
+        def _close_pos(reason: str) -> None:
             pos.realized_pnl_usd = pos.unrealized_pnl_usd
             portfolio.current_cash_usd += pos.notional_usd + pos.realized_pnl_usd
             portfolio.total_realized_pnl_usd += pos.realized_pnl_usd
             pos.status = "CLOSED"
-            pos.close_reason = "stop_loss"
+            pos.close_reason = reason
             pos.closed_at = now
             pos.updated_at = now
+
+        # Stop-loss: mark dropped 50% from entry
+        if new_mark < pos.entry_price * STOP_LOSS_RATIO:
+            _close_pos("stop_loss")
             stop_loss_closed += 1
-            total_unrealized -= pos.unrealized_pnl_usd  # already realized
+            total_unrealized -= pos.unrealized_pnl_usd
+            pos.unrealized_pnl_usd = 0.0
+            continue
+
+        # Take-profit: captured 65% of max possible gain
+        take_profit_price = pos.entry_price + (1.0 - pos.entry_price) * TAKE_PROFIT_RATIO
+        if new_mark >= take_profit_price:
+            _close_pos("take_profit")
+            total_unrealized -= pos.unrealized_pnl_usd
+            pos.unrealized_pnl_usd = 0.0
+            continue
+
+        # Time-exit: held too long with low remaining EV
+        days_held = (now - pos.opened_at).total_seconds() / 86400.0 if pos.opened_at else 0.0
+        ev_remaining = pos.entry_ev_pct or 0.0
+        if days_held >= TIME_EXIT_DAYS and ev_remaining < TIME_EXIT_MIN_EV:
+            _close_pos("time_exit")
+            total_unrealized -= pos.unrealized_pnl_usd
             pos.unrealized_pnl_usd = 0.0
 
     portfolio.total_unrealized_pnl_usd = total_unrealized

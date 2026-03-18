@@ -324,8 +324,8 @@ class TelegramProductService:
         )
 
         # Table in code block (no escaping needed inside ```)
-        rows = ["#   Dir  Koef   Вклад  Макс    EV     P&L    Дата"]
-        rows.append("─" * 55)
+        rows = ["#   Dir  Koef  Вклад  Макс   EV/д   P&L    Дата"]
+        rows.append("─" * 52)
         for i, (pos, market) in enumerate(open_positions, 1):
             mark = pos.mark_price or pos.entry_price
             koef = 1.0 / pos.entry_price if pos.entry_price > 0 else 0.0
@@ -333,10 +333,14 @@ class TelegramProductService:
             ev = pos.entry_ev_pct or 0.0
             pnl_pct = (mark - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
             dl = pos.resolution_deadline.strftime("%b %d") if pos.resolution_deadline else "  —  "
-            ev_str = f"{'+' if ev >= 0 else ''}{ev:.0f}%"
+            # daily_ev from open_reason if available
+            days_left = ((pos.resolution_deadline - datetime.now(UTC)).total_seconds() / 86400.0
+                         if pos.resolution_deadline else 999.0)
+            daily_ev = ev / max(1.0, days_left)
+            dev_str = f"{daily_ev*100:.2f}%"
             pnl_str = f"{'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
             rows.append(
-                f"{i:<3} {pos.direction:<3}  {koef:.2f}x  ${pos.notional_usd:<5.2f}  +${max_win:<5.2f}  {ev_str:<6}  {pnl_str:<6}  {dl}"
+                f"{i:<3} {pos.direction:<3}  {koef:.1f}x  ${pos.notional_usd:<5.2f} +${max_win:<5.2f} {dev_str:<6} {pnl_str:<6} {dl}"
             )
 
         # Titles block — short list after table
