@@ -15,8 +15,8 @@ import json
 from urllib import request as urllib_request
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from app.core.config import get_settings
 from app.models.enums import SignalType
@@ -27,32 +27,38 @@ from app.models.models import (
     Signal,
     Stage7AgentDecision,
 )
+from app.services.dryrun.kelly import kelly_fraction, portfolio_kelly_adjustment
+from app.services.dryrun.scorer import composite_score
 from app.utils.http import retry_request
 
 logger = logging.getLogger(__name__)
 
 PORTFOLIO_NAME = "default"
 INITIAL_BALANCE = 100.0
-MIN_POSITION_PCT = 0.03
-MAX_POSITION_PCT = 0.05
+CLOB_MAX_POSITION_PCT = 0.05
+NON_CLOB_MAX_POSITION_PCT = 0.02
+NON_CLOB_MAX_TOTAL_EXPOSURE_PCT = 0.15
+MAX_TOTAL_EXPOSURE_PCT = 0.40
 MIN_NOTIONAL_USD = 1.0
-STOP_LOSS_RATIO = 0.50        # close if mark drops 50% from entry
-TAKE_PROFIT_RATIO = 0.65      # close when 65% of max gain is captured
-TIME_EXIT_DAYS = 14           # exit if held this many days with low EV
-TIME_EXIT_MIN_EV = 0.03       # EV threshold below which time-exit triggers
+STOP_LOSS_PARTIAL_RATIO = 0.65  # close 50% if mark drops 35% from entry
+STOP_LOSS_FULL_RATIO = 0.40     # close full if mark drops 60% from entry
+TRAILING_TAKE_PROFIT_DRAWDOWN = 0.15
+TIME_EXIT_MIN_DAILY_EV = 0.0001
+TIME_EXIT_MIN_HOLD_DAYS = 7.0
 
 # Hard limits — never enter regardless of LLM opinion
 HARD_MAX_DAYS = 180
-HARD_MIN_VOLUME = 5_000
-HARD_MAX_SPREAD = 0.08
+HARD_MAX_SPREAD = 0.10
+MIN_SCORE_THRESHOLD = 0.35
+TOP_N_PER_CYCLE = 30
 
-# Soft limits — LLM reviews borderline cases that violate these but not hard limits
-SOFT_MAX_DAYS = 90
-SOFT_MIN_VOLUME = 50_000
-SOFT_MAX_SPREAD = 0.04
 
-# LLM-reviewed candidates: need EV/day above this to even bother asking LLM
-LLM_MIN_DAILY_EV = 0.0005    # 0.05% per day minimum to consider borderline
+def _as_utc_naive(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -81,17 +87,36 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
     settings = get_settings()
 
     # Pick first available LLM provider
-    providers = []
+    providers: list[tuple[str, str, str, dict[str, str]]] = []
     if settings.groq_api_key:
-        providers.append(("https://api.groq.com/openai/v1", settings.groq_api_key, settings.stage7_groq_model))
+        providers.append(
+            ("https://api.groq.com/openai/v1", settings.groq_api_key, settings.stage7_groq_model, {})
+        )
     if settings.gemini_api_key:
         providers.append((
             "https://generativelanguage.googleapis.com/v1beta/openai",
             settings.gemini_api_key,
             settings.stage7_gemini_model,
+            {},
         ))
+    if settings.openrouter_api_key:
+        extra_headers: dict[str, str] = {}
+        if str(settings.stage7_openrouter_http_referer or "").strip():
+            extra_headers["HTTP-Referer"] = str(settings.stage7_openrouter_http_referer).strip()
+        if str(settings.stage7_openrouter_x_title or "").strip():
+            extra_headers["X-Title"] = str(settings.stage7_openrouter_x_title).strip()
+        providers.append(
+            (
+                "https://openrouter.ai/api/v1",
+                settings.openrouter_api_key,
+                settings.stage7_openrouter_model,
+                extra_headers,
+            )
+        )
     if settings.stage7_openai_api_key:
-        providers.append((settings.stage7_openai_api_base_url, settings.stage7_openai_api_key, settings.stage7_openai_model))
+        providers.append(
+            (settings.stage7_openai_api_base_url, settings.stage7_openai_api_key, settings.stage7_openai_model, {})
+        )
     if not providers:
         return set()
 
@@ -109,7 +134,7 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
         for c in candidates
     ]
 
-    for api_base, api_key, model in providers:
+    for api_base, api_key, model, extra_headers in providers:
         try:
             body = json.dumps({
                 "model": model,
@@ -124,7 +149,11 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
                 f"{api_base.rstrip('/')}/chat/completions",
                 data=body,
                 method="POST",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    **extra_headers,
+                },
             )
             with urllib_request.urlopen(req, timeout=15.0) as resp:  # nosec B310
                 result = json.loads(resp.read().decode("utf-8"))
@@ -170,6 +199,7 @@ def reset_portfolio(db: Session) -> DryrunPortfolio:
     """Close all open positions and reset cash to $100."""
     portfolio = get_or_create_portfolio(db)
     now = datetime.now(UTC)
+    now_cmp = _as_utc_naive(now) or now.replace(tzinfo=None)
     open_positions = list(
         db.scalars(
             select(DryrunPosition).where(
@@ -197,16 +227,64 @@ def reset_portfolio(db: Session) -> DryrunPortfolio:
 # ---------------------------------------------------------------------------
 
 
-def _compute_position_pct(kelly: float, ev_pct: float) -> float | None:
-    """Return position fraction [3%, 5%] or None to skip."""
-    if ev_pct <= 0.0:
-        return None
-    if kelly > 0.0:
-        return max(MIN_POSITION_PCT, min(MAX_POSITION_PCT, kelly))
-    # Weak signal but positive EV → use minimum
-    if ev_pct >= 0.02:
-        return MIN_POSITION_PCT
-    return None
+def _extract_side_prices(market: Market, direction: str) -> tuple[float | None, float]:
+    is_clob = market.best_ask_yes is not None and market.best_bid_yes is not None
+    market_prob_yes = float(market.probability_yes) if market.probability_yes is not None else None
+    spread_pct = 0.05
+    if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
+        spread_pct = max(0.0, (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes))
+    elif market.spread_cents is not None:
+        spread_pct = max(0.0, min(0.2, float(market.spread_cents) / 100.0))
+
+    if direction == "YES":
+        if market.best_ask_yes is not None:
+            return float(market.best_ask_yes), spread_pct
+        if market_prob_yes is not None:
+            return min(0.99, max(0.01, market_prob_yes + spread_pct / 2.0)), spread_pct
+        return None, spread_pct
+
+    # NO side
+    if market.best_bid_yes is not None:
+        return min(0.99, max(0.01, 1.0 - float(market.best_bid_yes))), spread_pct
+    if market_prob_yes is not None:
+        no_prob = 1.0 - market_prob_yes
+        return min(0.99, max(0.01, no_prob + spread_pct / 2.0)), spread_pct
+    return None, spread_pct
+
+
+def _estimate_our_prob_yes(signal: Signal, s7: Stage7AgentDecision, market: Market) -> float:
+    ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
+    market_prob = ev_bundle.get("market_prob")
+    if isinstance(market_prob, (int, float)):
+        return min(0.95, max(0.05, float(market_prob)))
+
+    consensus = ev_bundle.get("external_consensus") if isinstance(ev_bundle.get("external_consensus"), dict) else {}
+    if isinstance(consensus, dict):
+        weighted = consensus.get("consensus_weighted_prob")
+        if isinstance(weighted, (int, float)):
+            return min(0.95, max(0.05, float(weighted)))
+
+    meta = signal.metadata_json or {}
+    cross_platform = meta.get("cross_platform_prob")
+    if isinstance(cross_platform, (int, float)):
+        return min(0.95, max(0.05, float(cross_platform)))
+
+    if str(signal.signal_mode or "").lower() == "momentum":
+        current = float(market.probability_yes or 0.5)
+        move = float(meta.get("price_move") or 0.0)
+        return min(0.95, max(0.05, current + move * 0.3))
+
+    return min(0.95, max(0.05, float(market.probability_yes or 0.5)))
+
+
+def _time_bucket_limit(days_to_res: float) -> float:
+    if days_to_res <= 14:
+        return 0.35
+    if days_to_res <= 45:
+        return 0.35
+    if days_to_res <= 90:
+        return 0.20
+    return 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +349,38 @@ def _get_token_id(market: Market) -> str | None:
     return None
 
 
+def _load_latest_keep_rows(db: Session, *, limit: int) -> list[tuple[Signal, Stage7AgentDecision, Market]]:
+    """Load candidate rows using only the latest Stage7 decision per signal."""
+    latest_ids = (
+        select(
+            Stage7AgentDecision.signal_id.label("signal_id"),
+            func.max(Stage7AgentDecision.id).label("latest_id"),
+        )
+        .group_by(Stage7AgentDecision.signal_id)
+        .subquery()
+    )
+    latest = aliased(Stage7AgentDecision)
+    return list(
+        db.execute(
+            select(Signal, latest, Market)
+            .join(latest_ids, latest_ids.c.signal_id == Signal.id)
+            .join(latest, latest.id == latest_ids.c.latest_id)
+            .join(Market, Market.id == Signal.market_id)
+            .where(
+                Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
+                latest.decision == "KEEP",
+                or_(
+                    Market.best_ask_yes.is_not(None),
+                    Market.best_bid_yes.is_not(None),
+                    Market.probability_yes.is_not(None),
+                ),
+            )
+            .order_by(latest.created_at.desc())
+            .limit(limit)
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared candidate scanning logic
 # ---------------------------------------------------------------------------
@@ -280,30 +390,17 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
     """Scan all Stage7-KEEP signals and classify them without touching DB.
 
     Returns dict with:
-      accepted      — list of dicts ready to open
-      borderline    — list sent to LLM (with filter_reason)
-      llm_approved  — set of signal_ids LLM approved from borderline
+      accepted      — ranked top candidates ready to open
+      borderline    — retained for backward-compatible UI (always empty in stage15)
+      llm_approved  — retained for backward-compatible UI (always empty in stage15)
       hard_rejected — list of {signal_id, title, reason}
-      soft_rejected — list of {signal_id, title, reason}
+      soft_rejected — kept for backward-compatible UI (unused in stage15)
       duplicates    — count already-open markets
     """
     portfolio = get_or_create_portfolio(db)
     now = datetime.now(UTC)
 
-    rows = list(
-        db.execute(
-            select(Signal, Stage7AgentDecision, Market)
-            .join(Stage7AgentDecision, Stage7AgentDecision.signal_id == Signal.id)
-            .join(Market, Market.id == Signal.market_id)
-            .where(
-                Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
-                Stage7AgentDecision.decision == "KEEP",
-                Market.best_ask_yes.is_not(None),
-            )
-            .order_by(Stage7AgentDecision.created_at.desc())
-            .limit(100)
-        )
-    )
+    rows = _load_latest_keep_rows(db, limit=100)
 
     open_market_ids: set[int] = set(
         db.scalars(
@@ -316,7 +413,6 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
 
     accepted: list[dict[str, Any]] = []
     borderline: list[dict[str, Any]] = []
-    borderline_map: dict[int, dict[str, Any]] = {}
     hard_rejected: list[dict[str, Any]] = []
     soft_rejected: list[dict[str, Any]] = []
     duplicates = 0
@@ -326,33 +422,51 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
             duplicates += 1
             continue
 
-        spread_pct = 0.0
-        if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
-            spread_pct = (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes)
-        elif market.spread_cents is not None:
-            mid = ((market.best_bid_yes or 0) + (market.best_ask_yes or 0)) / 2 or 0.5
-            spread_pct = float(market.spread_cents) / 100.0 / mid
-
+        direction = str(signal.signal_direction or "YES").upper()
+        if direction not in ("YES", "NO"):
+            direction = "YES"
+        entry_price, spread_pct = _extract_side_prices(market, direction=direction)
+        is_clob = market.best_bid_yes is not None and market.best_ask_yes is not None
+        if entry_price is None:
+            hard_rejected.append({"signal_id": signal.id, "title": market.title[:60], "reason": "entry_price_missing"})
+            continue
         volume = float(market.notional_value_dollars or market.liquidity_value or 0.0)
         days_to_res = 999.0
         if market.resolution_time:
             days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
 
         ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
-        kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
         ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
         if ev_pct <= 0.0 and signal.confidence_score:
             ev_pct = float(signal.confidence_score) * 0.05
         daily_ev = ev_pct / max(1.0, days_to_res)
+        confidence = float(signal.confidence_score or 0.0)
 
-        entry_price = float(market.best_ask_yes)
+        our_prob_yes = _estimate_our_prob_yes(signal, s7, market)
+        our_prob_side = our_prob_yes if direction == "YES" else (1.0 - our_prob_yes)
+        raw_kelly = kelly_fraction(
+            market_price=entry_price,
+            our_prob=our_prob_side,
+            alpha=0.25,
+            max_fraction=0.10,
+        )
+        score = composite_score(
+            daily_ev_pct=daily_ev,
+            spread=spread_pct,
+            volume_usd=volume,
+            confidence=confidence,
+            days_to_resolution=days_to_res,
+            kelly_fraction=raw_kelly,
+            is_clob=is_clob,
+        )
+
         koef = round(1.0 / entry_price, 2) if entry_price > 0 else 0.0
         max_win_pct = round((1.0 - entry_price) / entry_price * 100, 0)
 
         base_info = {
             "signal_id": signal.id,
             "title": market.title[:60],
-            "direction": str(signal.signal_direction or "YES").upper(),
+            "direction": direction,
             "ev_pct": ev_pct,
             "daily_ev": daily_ev,
             "days_to_res": days_to_res,
@@ -360,54 +474,33 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
             "spread_pct": spread_pct,
             "koef": koef,
             "max_win_pct": max_win_pct,
-            "kelly": kelly,
+            "kelly": raw_kelly,
+            "score": score,
+            "is_clob": is_clob,
         }
 
         # Hard reject
         hard_reason = None
         if spread_pct > HARD_MAX_SPREAD:
             hard_reason = f"spread {spread_pct:.1%} > {HARD_MAX_SPREAD:.0%}"
-        elif volume < HARD_MIN_VOLUME and volume > 0:
-            hard_reason = f"volume ${volume:.0f} < ${HARD_MIN_VOLUME:.0f}"
         elif days_to_res > HARD_MAX_DAYS:
             hard_reason = f"{days_to_res:.0f}d > {HARD_MAX_DAYS}d limit"
         if hard_reason:
             hard_rejected.append({**base_info, "reason": hard_reason})
             continue
 
-        # Soft violations
-        soft_violations: list[str] = []
-        if spread_pct > SOFT_MAX_SPREAD:
-            soft_violations.append(f"spread {spread_pct:.1%}")
-        if volume < SOFT_MIN_VOLUME:
-            soft_violations.append(f"vol ${volume/1000:.0f}k")
-        if days_to_res > SOFT_MAX_DAYS:
-            soft_violations.append(f"{days_to_res:.0f}d")
+        if score < MIN_SCORE_THRESHOLD:
+            soft_rejected.append({**base_info, "reason": f"score {score:.3f} < {MIN_SCORE_THRESHOLD:.2f}"})
+            continue
+        accepted.append(base_info)
 
-        if soft_violations:
-            if daily_ev >= LLM_MIN_DAILY_EV:
-                entry = {**base_info, "filter_reason": "; ".join(soft_violations)}
-                borderline.append(entry)
-                borderline_map[signal.id] = entry
-            else:
-                soft_rejected.append({**base_info, "reason": "; ".join(soft_violations), "note": "daily_ev too low for LLM"})
-        else:
-            accepted.append(base_info)
-
-    # LLM review for borderline
-    llm_approved: set[int] = set()
-    if borderline:
-        llm_approved = _llm_review_borderline(borderline)
-        for sig_id, entry in borderline_map.items():
-            if sig_id in llm_approved:
-                accepted.append(entry)
-
-    accepted.sort(key=lambda x: x["daily_ev"], reverse=True)
+    accepted.sort(key=lambda x: x["score"], reverse=True)
+    accepted = accepted[:TOP_N_PER_CYCLE]
 
     return {
         "accepted": accepted,
         "borderline": borderline,
-        "llm_approved": llm_approved,
+        "llm_approved": set(),
         "hard_rejected": hard_rejected,
         "soft_rejected": soft_rejected,
         "duplicates": duplicates,
@@ -433,150 +526,115 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
     opened = 0
     skipped = 0
     reasons: list[str] = []
-
-    # Stage7 KEEP + valid market price — Stage8 not required for paper trading
-    rows = list(
-        db.execute(
-            select(Signal, Stage7AgentDecision, Market)
-            .join(Stage7AgentDecision, Stage7AgentDecision.signal_id == Signal.id)
-            .join(Market, Market.id == Signal.market_id)
-            .where(
-                Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
-                Stage7AgentDecision.decision == "KEEP",
-                Market.best_ask_yes.is_not(None),
-            )
-            .order_by(Stage7AgentDecision.created_at.desc())
-            .limit(50)
-        )
-    )
+    scan = _scan_signal_candidates(db)
+    accepted_scored = list(scan.get("accepted") or [])
+    if not accepted_scored:
+        return {
+            "opened": 0,
+            "skipped": len(scan.get("hard_rejected") or []) + len(scan.get("soft_rejected") or []),
+            "cash_remaining_usd": round(portfolio.current_cash_usd, 4),
+            "skip_reasons": ["no_candidates_after_scoring"],
+        }
+    rows = _load_latest_keep_rows(db, limit=300)
+    by_signal_id = {int(signal.id): (signal, s7, market) for signal, s7, market in rows}
 
     # Collect already-open market IDs to avoid duplicate positions
-    open_market_ids: set[int] = set(
+    open_positions = list(
         db.scalars(
-            select(DryrunPosition.market_id).where(
+            select(DryrunPosition).where(
                 DryrunPosition.portfolio_id == portfolio.id,
                 DryrunPosition.status == "OPEN",
             )
         )
     )
+    open_market_ids: set[int] = {int(p.market_id) for p in open_positions}
 
     now = datetime.now(UTC)
+    total_open_notional_pct = sum(float(p.notional_usd or 0.0) for p in open_positions) / max(
+        float(portfolio.initial_balance_usd), 1.0
+    )
+    non_clob_open_notional_pct = (
+        sum(float(p.notional_usd or 0.0) for p in open_positions if (str(p.open_reason or "").find("non_clob") >= 0))
+        / max(float(portfolio.initial_balance_usd), 1.0)
+    )
+    bucket_open_notional_pct: dict[str, float] = {"0_14": 0.0, "15_45": 0.0, "46_90": 0.0, "91_180": 0.0}
+    for p in open_positions:
+        days = 999.0
+        if p.resolution_deadline:
+            days = max(0.5, (p.resolution_deadline - now).total_seconds() / 86400.0)
+        if days <= 14:
+            bucket_open_notional_pct["0_14"] += float(p.notional_usd or 0.0)
+        elif days <= 45:
+            bucket_open_notional_pct["15_45"] += float(p.notional_usd or 0.0)
+        elif days <= 90:
+            bucket_open_notional_pct["46_90"] += float(p.notional_usd or 0.0)
+        else:
+            bucket_open_notional_pct["91_180"] += float(p.notional_usd or 0.0)
+    for key in list(bucket_open_notional_pct.keys()):
+        bucket_open_notional_pct[key] /= max(float(portfolio.initial_balance_usd), 1.0)
 
-    # Build candidate list with computed metrics for smart sorting
-    # Separate hard-rejected, borderline (LLM review), and accepted
-    CandidateTuple = tuple  # (signal, s7, market, kelly, ev_pct, daily_ev)
-    accepted: list[CandidateTuple] = []
-    borderline: list[dict[str, Any]] = []   # for LLM review
-    borderline_map: dict[int, CandidateTuple] = {}  # signal_id → tuple
-
-    for signal, s7, market in rows:
+    for cand in accepted_scored:
+        sid = int(cand.get("signal_id") or 0)
+        triple = by_signal_id.get(sid)
+        if triple is None:
+            skipped += 1
+            reasons.append(f"signal {sid}: missing latest row")
+            continue
+        signal, s7, market = triple
         if market.id in open_market_ids:
             skipped += 1
-            continue
-
-        # --- Compute metrics ---
-        spread_pct = 0.0
-        if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
-            spread_pct = (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes)
-        elif market.spread_cents is not None:
-            mid = ((market.best_bid_yes or 0) + (market.best_ask_yes or 0)) / 2 or 0.5
-            spread_pct = float(market.spread_cents) / 100.0 / mid
-
-        volume = float(market.notional_value_dollars or market.liquidity_value or 0.0)
-
-        days_to_res = 999.0
-        if market.resolution_time:
-            days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
-
-        ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
-        kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
-        ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
-        if ev_pct <= 0.0 and signal.confidence_score:
-            ev_pct = float(signal.confidence_score) * 0.05
-        daily_ev = ev_pct / max(1.0, days_to_res)
-
-        # --- Hard limits: always skip, no LLM override ---
-        if spread_pct > HARD_MAX_SPREAD:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: hard-reject spread {spread_pct:.1%}")
-            continue
-        if volume < HARD_MIN_VOLUME and volume > 0:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: hard-reject volume ${volume:.0f}")
-            continue
-        if days_to_res > HARD_MAX_DAYS:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: hard-reject {days_to_res:.0f}d")
-            continue
-
-        # --- Soft limits: send borderline cases to LLM ---
-        soft_violations: list[str] = []
-        if spread_pct > SOFT_MAX_SPREAD:
-            soft_violations.append(f"spread {spread_pct:.1%} > {SOFT_MAX_SPREAD:.0%}")
-        if volume < SOFT_MIN_VOLUME:
-            soft_violations.append(f"volume ${volume:.0f} < ${SOFT_MIN_VOLUME:.0f}")
-        if days_to_res > SOFT_MAX_DAYS:
-            soft_violations.append(f"{days_to_res:.0f}d > {SOFT_MAX_DAYS}d")
-
-        tup = (signal, s7, market, kelly, ev_pct, daily_ev)
-        if soft_violations and daily_ev >= LLM_MIN_DAILY_EV:
-            # Borderline: has some violation but enough EV/day to be worth LLM review
-            borderline_map[signal.id] = tup
-            borderline.append({
-                "signal_id": signal.id,
-                "title": market.title,
-                "ev_pct": ev_pct,
-                "daily_ev": daily_ev,
-                "days_to_res": days_to_res,
-                "volume_usd": volume,
-                "spread_pct": spread_pct,
-                "filter_reason": "; ".join(soft_violations),
-            })
-        elif soft_violations:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: soft-reject {'; '.join(soft_violations)} (daily_ev too low)")
-        else:
-            accepted.append(tup)
-
-    # LLM reviews borderline candidates
-    if borderline:
-        llm_approved = _llm_review_borderline(borderline)
-        for sig_id, tup in borderline_map.items():
-            if sig_id in llm_approved:
-                accepted.append(tup)
-                reasons.append(f"signal {sig_id}: borderline → LLM approved")
-            else:
-                skipped += 1
-                reasons.append(f"signal {sig_id}: borderline → LLM rejected")
-
-    candidates = accepted
-
-    # Sort by daily_ev descending — best return per day of capital lock first
-    candidates.sort(key=lambda x: x[5], reverse=True)  # type: ignore[attr-defined]
-
-    for signal, s7, market, kelly, ev_pct, daily_ev in candidates:
-        position_pct = _compute_position_pct(kelly, ev_pct)
-        if position_pct is None:
-            position_pct = MIN_POSITION_PCT
-
-        notional = portfolio.current_cash_usd * position_pct
-        if notional < MIN_NOTIONAL_USD:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: notional ${notional:.2f} < min ${MIN_NOTIONAL_USD}")
+            reasons.append(f"signal {signal.id}: duplicate open market")
             continue
 
         direction = str(signal.signal_direction or "YES").upper()
         if direction not in ("YES", "NO"):
             direction = "YES"
-
-        # YES: pay the ask price. NO: NO ask = 1 - YES bid (not 1 - YES ask)
-        if direction == "YES":
-            entry_price = float(market.best_ask_yes)
-        else:
-            yes_bid = float(market.best_bid_yes) if market.best_bid_yes is not None else float(market.best_ask_yes)
-            entry_price = 1.0 - yes_bid
-        if entry_price <= 0.0 or entry_price >= 1.0:
+        entry_price, spread_pct = _extract_side_prices(market, direction)
+        if entry_price is None:
             skipped += 1
+            reasons.append(f"signal {signal.id}: entry price unavailable")
+            continue
+        days_to_res = float(cand.get("days_to_res") or 999.0)
+        ev_pct = float(cand.get("ev_pct") or 0.0)
+        daily_ev = float(cand.get("daily_ev") or 0.0)
+        is_clob = bool(cand.get("is_clob"))
+
+        our_prob_yes = _estimate_our_prob_yes(signal, s7, market)
+        our_prob_side = our_prob_yes if direction == "YES" else (1.0 - our_prob_yes)
+        base_kelly = kelly_fraction(market_price=entry_price, our_prob=our_prob_side, alpha=0.25, max_fraction=0.10)
+        adjusted_kelly = portfolio_kelly_adjustment(
+            base_kelly=base_kelly,
+            total_open_notional_pct=total_open_notional_pct,
+            max_total_exposure=MAX_TOTAL_EXPOSURE_PCT,
+        )
+        position_cap = CLOB_MAX_POSITION_PCT if is_clob else NON_CLOB_MAX_POSITION_PCT
+        position_pct = min(adjusted_kelly, position_cap)
+        if position_pct <= 0.0:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: zero kelly after portfolio adjustment")
+            continue
+
+        bucket_key = "91_180"
+        if days_to_res <= 14:
+            bucket_key = "0_14"
+        elif days_to_res <= 45:
+            bucket_key = "15_45"
+        elif days_to_res <= 90:
+            bucket_key = "46_90"
+        bucket_limit = _time_bucket_limit(days_to_res)
+        if bucket_open_notional_pct[bucket_key] + position_pct > bucket_limit:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: bucket exposure limit reached ({bucket_key})")
+            continue
+        if (not is_clob) and (non_clob_open_notional_pct + position_pct > NON_CLOB_MAX_TOTAL_EXPOSURE_PCT):
+            skipped += 1
+            reasons.append(f"signal {signal.id}: non-clob exposure limit reached")
+            continue
+
+        notional = portfolio.current_cash_usd * position_pct
+        if notional < MIN_NOTIONAL_USD:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: notional ${notional:.2f} < min ${MIN_NOTIONAL_USD}")
             continue
 
         days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0) if market.resolution_time else 999.0
@@ -593,14 +651,22 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             notional_usd=notional,
             shares_count=shares,
             status="OPEN",
-            open_reason=f"kelly={kelly:.4f},ev={ev_pct:.4f},daily_ev={daily_ev:.5f},stage7=KEEP",
-            entry_kelly_fraction=kelly,
+            open_reason=(
+                f"kelly={adjusted_kelly:.4f},ev={ev_pct:.4f},daily_ev={daily_ev:.5f},"
+                f"score={float(cand.get('score') or 0.0):.4f},"
+                f"{'clob' if is_clob else 'non_clob'},peak={entry_price:.6f}"
+            ),
+            entry_kelly_fraction=adjusted_kelly,
             entry_ev_pct=ev_pct,
             unrealized_pnl_usd=0.0,
             resolution_deadline=market.resolution_time,
         )
         db.add(pos)
         portfolio.current_cash_usd -= notional
+        total_open_notional_pct += position_pct
+        if not is_clob:
+            non_clob_open_notional_pct += position_pct
+        bucket_open_notional_pct[bucket_key] += position_pct
         open_market_ids.add(market.id)
         opened += 1
 
@@ -631,9 +697,13 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
     )
 
     updated = 0
+    stop_loss_partial = 0
     stop_loss_closed = 0
+    trailing_closed = 0
+    time_exit_closed = 0
     expired_closed = 0
     now = datetime.now(UTC)
+    now_cmp = _as_utc_naive(now) or now.replace(tzinfo=None)
     total_unrealized = 0.0
 
     for pos in open_positions:
@@ -642,7 +712,8 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
             continue
 
         # Check expiry
-        if pos.resolution_deadline and now > pos.resolution_deadline:
+        pos_deadline = _as_utc_naive(pos.resolution_deadline)
+        if pos_deadline and now_cmp > pos_deadline:
             mark = pos.mark_price or pos.entry_price
             pos.realized_pnl_usd = (mark - pos.entry_price) * pos.shares_count
             portfolio.current_cash_usd += pos.notional_usd + pos.realized_pnl_usd
@@ -686,29 +757,68 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
             pos.close_reason = reason
             pos.closed_at = now
             pos.updated_at = now
+        # Persist peak mark in open_reason as "...peak=0.123456"
+        peak = pos.entry_price
+        reason_text = str(pos.open_reason or "")
+        try:
+            if "peak=" in reason_text:
+                peak = float(reason_text.split("peak=")[-1].split(",")[0].strip())
+        except Exception:
+            peak = pos.entry_price
+        if new_mark > peak:
+            peak = new_mark
+            if "peak=" in reason_text:
+                prefix = reason_text.split("peak=")[0].rstrip(",")
+                pos.open_reason = f"{prefix},peak={peak:.6f}"
+            else:
+                pos.open_reason = f"{reason_text},peak={peak:.6f}".strip(",")
 
-        # Stop-loss: mark dropped 50% from entry
-        if new_mark < pos.entry_price * STOP_LOSS_RATIO:
-            _close_pos("stop_loss")
+        partial_already_done = "partial_stop_hit" in reason_text
+
+        # Stop-loss stage 1: partial exit at 65% of entry (one-time only)
+        if (not partial_already_done) and new_mark <= pos.entry_price * STOP_LOSS_PARTIAL_RATIO and pos.shares_count > 0:
+            partial_shares = pos.shares_count * 0.5
+            partial_notional = pos.notional_usd * 0.5
+            partial_pnl = (new_mark - pos.entry_price) * partial_shares
+            pos.shares_count -= partial_shares
+            pos.notional_usd -= partial_notional
+            pos.realized_pnl_usd += partial_pnl
+            portfolio.current_cash_usd += partial_notional + partial_pnl
+            portfolio.total_realized_pnl_usd += partial_pnl
+            pos.open_reason = f"{str(pos.open_reason or '')},partial_stop_hit".strip(",")
+            # Recompute unrealized after partial close
+            pos.unrealized_pnl_usd = (new_mark - pos.entry_price) * pos.shares_count
+            stop_loss_partial += 1
+
+        # Stop-loss stage 2: full exit at 40% of entry
+        if new_mark <= pos.entry_price * STOP_LOSS_FULL_RATIO:
+            _close_pos("stop_loss_full")
             stop_loss_closed += 1
             total_unrealized -= pos.unrealized_pnl_usd
             pos.unrealized_pnl_usd = 0.0
             continue
 
-        # Take-profit: captured 65% of max possible gain
-        take_profit_price = pos.entry_price + (1.0 - pos.entry_price) * TAKE_PROFIT_RATIO
-        if new_mark >= take_profit_price:
-            _close_pos("take_profit")
+        # Take-profit: trailing stop from peak mark
+        trailing_trigger = peak * (1.0 - TRAILING_TAKE_PROFIT_DRAWDOWN)
+        if peak > pos.entry_price and new_mark <= trailing_trigger:
+            _close_pos("take_profit_trailing")
+            trailing_closed += 1
             total_unrealized -= pos.unrealized_pnl_usd
             pos.unrealized_pnl_usd = 0.0
             continue
 
-        # Time-exit: held too long with little movement (capital is stuck)
-        days_held = (now - pos.opened_at).total_seconds() / 86400.0 if pos.opened_at else 0.0
-        # ev_remaining = current unrealized P&L as % of notional (how much we're actually gaining)
+        # Time-exit: close if expected remaining value per day is tiny
+        opened_at_cmp = _as_utc_naive(pos.opened_at)
+        days_held = (now_cmp - opened_at_cmp).total_seconds() / 86400.0 if opened_at_cmp else 0.0
+        days_left = max(
+            1.0,
+            ((pos_deadline - now_cmp).total_seconds() / 86400.0) if pos_deadline else 999.0,
+        )
         ev_remaining = pos.unrealized_pnl_usd / pos.notional_usd if pos.notional_usd > 0 else 0.0
-        if days_held >= TIME_EXIT_DAYS and abs(ev_remaining) < TIME_EXIT_MIN_EV:
-            _close_pos("time_exit")
+        daily_ev_remaining = ev_remaining / days_left
+        if days_held >= TIME_EXIT_MIN_HOLD_DAYS and daily_ev_remaining < TIME_EXIT_MIN_DAILY_EV:
+            _close_pos("time_exit_low_daily_ev")
+            time_exit_closed += 1
             total_unrealized -= pos.unrealized_pnl_usd
             pos.unrealized_pnl_usd = 0.0
 
@@ -718,7 +828,10 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
 
     return {
         "prices_updated": updated,
+        "stop_loss_partial": stop_loss_partial,
         "stop_loss_closed": stop_loss_closed,
+        "trailing_closed": trailing_closed,
+        "time_exit_closed": time_exit_closed,
         "expired_closed": expired_closed,
         "total_unrealized_usd": round(total_unrealized, 4),
     }

@@ -105,6 +105,59 @@ def build_report(db: Session) -> dict[str, Any]:
         "profit_probability_pct": _profit_probability(win_rate, n_closed),
     }
 
+    # Stage 15 metrics
+    resolved_positions = [
+        p for p in closed_positions if str(p.close_reason or "").startswith("resolved_")
+    ]
+    brier_score = 0.0
+    if resolved_positions:
+        errors: list[float] = []
+        for p in resolved_positions:
+            # Brier in YES-event coordinate system.
+            # For NO positions, stored entry_price is P(NO), so convert to P(YES).
+            y_pred = float(p.entry_price or 0.5)
+            if str(p.direction or "YES").upper() == "NO":
+                y_pred = 1.0 - y_pred
+            # close_reason resolved_yes / resolved_no encodes realized YES outcome.
+            y_true = 1.0 if str(p.close_reason or "") == "resolved_yes" else 0.0
+            errors.append((y_pred - y_true) ** 2)
+        brier_score = sum(errors) / len(errors)
+
+    # Daily realized EV and Sharpe-like ratio
+    daily_realized: dict[str, float] = {}
+    for p in closed_positions:
+        if p.closed_at is None:
+            continue
+        day = p.closed_at.date().isoformat()
+        daily_realized[day] = daily_realized.get(day, 0.0) + float(p.realized_pnl_usd or 0.0)
+    daily_values = list(daily_realized.values())
+    daily_ev_realized = 0.0
+    sharpe_like = 0.0
+    if daily_values:
+        daily_ev_realized = sum(daily_values) / len(daily_values)
+        mean = daily_ev_realized
+        var = sum((x - mean) ** 2 for x in daily_values) / max(len(daily_values), 1)
+        std = math.sqrt(var)
+        sharpe_like = (mean / std) if std > 0 else 0.0
+
+    bucket_breakdown = {"0_14d": 0, "15_45d": 0, "46_90d": 0, "91_180d": 0}
+    for pos, market, _ in all_positions:
+        days_to_res = 999
+        if market and market.resolution_time and pos.opened_at:
+            days_to_res = int(max(0.0, (market.resolution_time - pos.opened_at).total_seconds() / 86400.0))
+        if days_to_res <= 14:
+            bucket_breakdown["0_14d"] += 1
+        elif days_to_res <= 45:
+            bucket_breakdown["15_45d"] += 1
+        elif days_to_res <= 90:
+            bucket_breakdown["46_90d"] += 1
+        else:
+            bucket_breakdown["91_180d"] += 1
+    stats["brier_score"] = round(float(brier_score), 6)
+    stats["sharpe_ratio"] = round(float(sharpe_like), 6)
+    stats["realized_daily_ev_usd"] = round(float(daily_ev_realized), 6)
+    stats["time_bucket_breakdown"] = bucket_breakdown
+
     positions_out = []
     for pos, market, signal in all_positions:
         unrealized = pos.unrealized_pnl_usd if pos.status == "OPEN" else 0.0

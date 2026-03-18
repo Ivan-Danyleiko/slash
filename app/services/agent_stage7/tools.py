@@ -127,7 +127,9 @@ def get_signal_history_metrics(db: Session, signal_type: str, horizon: str) -> d
             p1 = getattr(row, _HORIZON_TO_FIELD[h].key)
             if p0 is None or p1 is None:
                 continue
-            returns.append(float(p1) - float(p0))
+            direction = str(getattr(row, "signal_direction", "YES") or "YES").upper()
+            delta = float(p1) - float(p0)
+            returns.append(delta if direction != "NO" else -delta)
         n = len(returns)
         wins = [x for x in returns if x > 0]
         losses = [x for x in returns if x <= 0]
