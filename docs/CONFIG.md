@@ -66,8 +66,32 @@
 6. `SIGNAL_EXECUTION_POLYMARKET_MODE` (`gamma_api`/`clob_api`)
 7. `SIGNAL_EXECUTION_POLYMARKET_GAS_FEE_USD`
 8. `SIGNAL_EXECUTION_POLYMARKET_BRIDGE_FEE_USD`
-9. `AGENT_POLICY_KEEP_EV_THRESHOLD_PCT`
-10. `AGENT_POLICY_MODIFY_EV_THRESHOLD_PCT`
-11. `AGENT_POLICY_MIN_CONFIDENCE`
+9. `AGENT_POLICY_KEEP_EV_THRESHOLD_PCT` (default `0.003` — 0.3%)
+10. `AGENT_POLICY_MODIFY_EV_THRESHOLD_PCT` (default `0.001`)
+11. `AGENT_POLICY_MIN_CONFIDENCE` (default `0.35`)
 12. `AGENT_POLICY_MIN_LIQUIDITY`
 13. `AGENT_POLICY_VERSION`
+
+## Stage 7 LLM провайдери
+
+1. `STAGE7_AGENT_REAL_CALLS_ENABLED` — `true` = реальні LLM-виклики через FallbackAdapter (groq→gemini→openrouter); `false` = PlainApiAdapter (детерміністичний, без мережі)
+2. `STAGE7_AGENT_PROVIDER` (`openai_compatible` / `langgraph`)
+3. `STAGE7_AGENT_PROVIDER_PROFILE` (`gemini` / `groq` / `openrouter`) — профіль одного провайдера; при `real_calls=true` ігнорується, бо використовується FallbackAdapter
+4. `STAGE7_GEMINI_MODEL` (default `gemini-2.5-flash`)
+5. `STAGE7_GROQ_MODEL` (default `llama-3.3-70b-versatile`)
+6. `STAGE7_OPENROUTER_MODEL` (default `google/gemini-2.5-flash`)
+7. `STAGE7_AGENT_INTERNAL_GATE_PROFILE` (`permissive` / `balanced` / `strict`)
+8. `STAGE7_AGENT_MONTHLY_BUDGET_USD`
+9. `STAGE7_AGENT_COST_PER_CALL_USD`
+
+## Polymarket CLOB
+
+1. `POLYMARKET_CLOB_ENABLED` — увімкнути отримання bid/ask через CLOB API
+2. `POLYMARKET_CLOB_API_BASE_URL`
+3. `POLYMARKET_CLOB_API_KEY`
+4. Порогова ліквідність для CLOB-виклику задана хардкодом у колекторі: `>= $1000` (max 3000 ринків за цикл)
+
+## Logging
+
+1. `LOG_DIR` (default `/app/logs`) — директорія для ротованих лог-файлів
+2. Ротація: 50 MB на файл, зберігати 5 файлів (максимум 250 MB)

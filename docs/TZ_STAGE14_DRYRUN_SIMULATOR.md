@@ -201,13 +201,21 @@ Celery task кожні 30 хв:
 - [x] Додати endpoints в `admin.py`
 - [x] Alembic міграція `0017_dryrun_simulator`
 
-### Phase 2 — Mark-to-Market
-- [ ] Celery task: refresh CLOB prices для open positions
-- [ ] Stop-loss автозакриття
+### Phase 2 — Mark-to-Market ✅ ВИКОНАНО
+- [x] Celery task `dryrun_refresh_prices`: refresh CLOB prices для open positions
+- [x] Stop-loss автозакриття (mark_price < entry * 0.5)
+- [x] Time-exit: закриття при low EV після TIME_EXIT_DAYS=14
+- [x] Take-profit: закриття при 65% захопленого максимального прибутку
 
-### Phase 3 — Resolution Tracking
-- [ ] Polling Gamma API для resolved ринків
-- [ ] Auto-close з реальним P&L
+### Phase 3 — Resolution Tracking ✅ ВИКОНАНО
+- [x] Polling Gamma API для resolved ринків (`check_resolutions`)
+- [x] Auto-close з реальним P&L
+- [x] `stage11_reconcile` Celery task (кожні 10 хв)
+
+### Phase 4 — Перша реальна позиція ✅ 2026-03-18
+- [x] Відкрито першу позицію: **OKC Thunder NBA Western Conference Finals** (Polymarket)
+  - Entry: $0.51 YES, spread 2.0%, notional $5, resolution 2026-06-16
+  - kelly=0.389, ev=1.95%, daily_ev=0.022%
 
 ---
 
