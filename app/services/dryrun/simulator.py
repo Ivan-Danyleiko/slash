@@ -269,6 +269,149 @@ def _get_token_id(market: Market) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Shared candidate scanning logic
+# ---------------------------------------------------------------------------
+
+
+def _scan_signal_candidates(db: Session) -> dict[str, Any]:
+    """Scan all Stage7-KEEP signals and classify them without touching DB.
+
+    Returns dict with:
+      accepted      — list of dicts ready to open
+      borderline    — list sent to LLM (with filter_reason)
+      llm_approved  — set of signal_ids LLM approved from borderline
+      hard_rejected — list of {signal_id, title, reason}
+      soft_rejected — list of {signal_id, title, reason}
+      duplicates    — count already-open markets
+    """
+    portfolio = get_or_create_portfolio(db)
+    now = datetime.now(UTC)
+
+    rows = list(
+        db.execute(
+            select(Signal, Stage7AgentDecision, Market)
+            .join(Stage7AgentDecision, Stage7AgentDecision.signal_id == Signal.id)
+            .join(Market, Market.id == Signal.market_id)
+            .where(
+                Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
+                Stage7AgentDecision.decision == "KEEP",
+                Market.best_ask_yes.is_not(None),
+            )
+            .order_by(Stage7AgentDecision.created_at.desc())
+            .limit(100)
+        )
+    )
+
+    open_market_ids: set[int] = set(
+        db.scalars(
+            select(DryrunPosition.market_id).where(
+                DryrunPosition.portfolio_id == portfolio.id,
+                DryrunPosition.status == "OPEN",
+            )
+        )
+    )
+
+    accepted: list[dict[str, Any]] = []
+    borderline: list[dict[str, Any]] = []
+    borderline_map: dict[int, dict[str, Any]] = {}
+    hard_rejected: list[dict[str, Any]] = []
+    soft_rejected: list[dict[str, Any]] = []
+    duplicates = 0
+
+    for signal, s7, market in rows:
+        if market.id in open_market_ids:
+            duplicates += 1
+            continue
+
+        spread_pct = 0.0
+        if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
+            spread_pct = (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes)
+        elif market.spread_cents is not None:
+            mid = ((market.best_bid_yes or 0) + (market.best_ask_yes or 0)) / 2 or 0.5
+            spread_pct = float(market.spread_cents) / 100.0 / mid
+
+        volume = float(market.notional_value_dollars or market.liquidity_value or 0.0)
+        days_to_res = 999.0
+        if market.resolution_time:
+            days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
+
+        ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
+        kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
+        ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
+        if ev_pct <= 0.0 and signal.confidence_score:
+            ev_pct = float(signal.confidence_score) * 0.05
+        daily_ev = ev_pct / max(1.0, days_to_res)
+
+        entry_price = float(market.best_ask_yes)
+        koef = round(1.0 / entry_price, 2) if entry_price > 0 else 0.0
+        max_win_pct = round((1.0 - entry_price) / entry_price * 100, 0)
+
+        base_info = {
+            "signal_id": signal.id,
+            "title": market.title[:60],
+            "direction": str(signal.signal_direction or "YES").upper(),
+            "ev_pct": ev_pct,
+            "daily_ev": daily_ev,
+            "days_to_res": days_to_res,
+            "volume_usd": volume,
+            "spread_pct": spread_pct,
+            "koef": koef,
+            "max_win_pct": max_win_pct,
+            "kelly": kelly,
+        }
+
+        # Hard reject
+        hard_reason = None
+        if spread_pct > HARD_MAX_SPREAD:
+            hard_reason = f"spread {spread_pct:.1%} > {HARD_MAX_SPREAD:.0%}"
+        elif volume < HARD_MIN_VOLUME and volume > 0:
+            hard_reason = f"volume ${volume:.0f} < ${HARD_MIN_VOLUME:.0f}"
+        elif days_to_res > HARD_MAX_DAYS:
+            hard_reason = f"{days_to_res:.0f}d > {HARD_MAX_DAYS}d limit"
+        if hard_reason:
+            hard_rejected.append({**base_info, "reason": hard_reason})
+            continue
+
+        # Soft violations
+        soft_violations: list[str] = []
+        if spread_pct > SOFT_MAX_SPREAD:
+            soft_violations.append(f"spread {spread_pct:.1%}")
+        if volume < SOFT_MIN_VOLUME:
+            soft_violations.append(f"vol ${volume/1000:.0f}k")
+        if days_to_res > SOFT_MAX_DAYS:
+            soft_violations.append(f"{days_to_res:.0f}d")
+
+        if soft_violations:
+            if daily_ev >= LLM_MIN_DAILY_EV:
+                entry = {**base_info, "filter_reason": "; ".join(soft_violations)}
+                borderline.append(entry)
+                borderline_map[signal.id] = entry
+            else:
+                soft_rejected.append({**base_info, "reason": "; ".join(soft_violations), "note": "daily_ev too low for LLM"})
+        else:
+            accepted.append(base_info)
+
+    # LLM review for borderline
+    llm_approved: set[int] = set()
+    if borderline:
+        llm_approved = _llm_review_borderline(borderline)
+        for sig_id, entry in borderline_map.items():
+            if sig_id in llm_approved:
+                accepted.append(entry)
+
+    accepted.sort(key=lambda x: x["daily_ev"], reverse=True)
+
+    return {
+        "accepted": accepted,
+        "borderline": borderline,
+        "llm_approved": llm_approved,
+        "hard_rejected": hard_rejected,
+        "soft_rejected": soft_rejected,
+        "duplicates": duplicates,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main simulation cycle
 # ---------------------------------------------------------------------------
 

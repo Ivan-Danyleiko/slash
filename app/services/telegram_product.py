@@ -353,6 +353,63 @@ class TelegramProductService:
         table_block = "```\n" + "\n".join(rows) + "\n```"
         return header + "\n\n" + table_block + "\n" + "\n".join(titles_lines)
 
+    def get_simulate_text(self) -> str:
+        """Full candidate scan report without opening positions."""
+        from app.services.dryrun.simulator import _scan_signal_candidates
+        result = _scan_signal_candidates(self.db)
+
+        accepted = result["accepted"]
+        borderline = result["borderline"]
+        llm_approved = result["llm_approved"]
+        hard_rejected = result["hard_rejected"]
+        soft_rejected = result["soft_rejected"]
+        duplicates = result["duplicates"]
+
+        llm_from_borderline = [b for b in borderline if b["signal_id"] in llm_approved]
+        llm_rejected = [b for b in borderline if b["signal_id"] not in llm_approved]
+
+        lines = [
+            "🔬 *Simulate — candidate scan*",
+            f"✅ Accepted: `{len(accepted)}` \\| 🤖 LLM rescued: `{len(llm_from_borderline)}` \\| ⏭ Dupes: `{duplicates}`",
+            f"🚫 Hard\\-rejected: `{len(hard_rejected)}` \\| 🟡 Soft\\-rejected: `{len(soft_rejected)}` \\| 🤖 LLM\\-rejected: `{len(llm_rejected)}`",
+            "",
+        ]
+
+        if accepted:
+            lines.append("*✅ Would open \\(top 5 by EV/day\\):*")
+            rows = ["#  Dir  Koef  EV/d    Days  Vol     Title"]
+            rows.append("─" * 52)
+            for i, c in enumerate(accepted[:5], 1):
+                dl = f"{c['days_to_res']:.0f}d" if c["days_to_res"] < 999 else "  —"
+                vol = f"${c['volume_usd']/1000:.0f}k" if c["volume_usd"] >= 1000 else f"${c['volume_usd']:.0f}"
+                dev = f"{c['daily_ev']*100:.3f}%"
+                title = c["title"][:22]
+                rows.append(f"{i:<2} {c['direction']:<3}  {c['koef']:.1f}x  {dev:<7} {dl:<5} {vol:<7} {title}")
+            lines.append("```\n" + "\n".join(rows) + "\n```")
+
+        if llm_from_borderline:
+            lines.append("*🤖 LLM врятував \\(borderline → approved\\):*")
+            for c in llm_from_borderline:
+                lines.append(f"• _{self._esc(c['title'][:50])}_ — `{c['filter_reason']}`")
+            lines.append("")
+
+        if llm_rejected:
+            lines.append("*🤖 LLM відхилив \\(borderline → rejected\\):*")
+            for c in llm_rejected[:3]:
+                lines.append(f"• _{self._esc(c['title'][:50])}_ — `{c['filter_reason']}`")
+            lines.append("")
+
+        if hard_rejected:
+            lines.append("*🚫 Hard\\-rejected \\(топ 3\\):*")
+            for c in hard_rejected[:3]:
+                lines.append(f"• _{self._esc(c['title'][:50])}_ — `{self._esc(c['reason'])}`")
+            lines.append("")
+
+        if not accepted and not llm_from_borderline:
+            lines.append("_Немає кандидатів для відкриття позицій\\._")
+
+        return "\n".join(lines)
+
     def get_dryrun_pnl_text(self) -> str:
         portfolio = self._get_dryrun_portfolio()
         if portfolio is None:

@@ -383,6 +383,21 @@ async def cmd_dryrun(message: Message) -> None:
         await _err(message, exc)
 
 
+@dp.message(Command("simulate"))
+async def cmd_simulate(message: Message) -> None:
+    if not _is_admin(message):
+        await message.answer("⛔ Admin only")
+        return
+    try:
+        await message.answer("🔬 Scanning candidates\\.\\.\\.", parse_mode="MarkdownV2")
+        with _db() as db:
+            svc = TelegramProductService(db)
+            text = svc.get_simulate_text()
+        await message.answer(text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    except Exception as exc:
+        await _err(message, exc)
+
+
 @dp.message(Command("refresh"))
 async def cmd_refresh(message: Message) -> None:
     if not _is_admin(message):
@@ -430,6 +445,7 @@ _ADMIN_COMMANDS = _USER_COMMANDS + [
     BotCommand(command="positions", description="Open positions"),
     BotCommand(command="pnl", description="P&L report"),
     BotCommand(command="dryrun", description="Run simulation cycle now"),
+    BotCommand(command="simulate", description="Scan candidates (no positions opened)"),
     BotCommand(command="refresh", description="Refresh mark prices & resolutions"),
 ]
 
