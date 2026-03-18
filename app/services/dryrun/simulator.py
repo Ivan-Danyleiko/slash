@@ -11,6 +11,9 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+import json
+from urllib import request as urllib_request
+
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -37,9 +40,108 @@ STOP_LOSS_RATIO = 0.50        # close if mark drops 50% from entry
 TAKE_PROFIT_RATIO = 0.65      # close when 65% of max gain is captured
 TIME_EXIT_DAYS = 14           # exit if held this many days with low EV
 TIME_EXIT_MIN_EV = 0.03       # EV threshold below which time-exit triggers
-MAX_DAYS_TO_RESOLUTION = 90   # skip markets resolving in more than N days
-MIN_VOLUME_USD = 50_000       # skip markets with total volume < $50k
-MAX_SPREAD_PCT = 0.04         # skip markets with bid-ask spread > 4%
+
+# Hard limits — never enter regardless of LLM opinion
+HARD_MAX_DAYS = 180
+HARD_MIN_VOLUME = 5_000
+HARD_MAX_SPREAD = 0.08
+
+# Soft limits — LLM reviews borderline cases that violate these but not hard limits
+SOFT_MAX_DAYS = 90
+SOFT_MIN_VOLUME = 50_000
+SOFT_MAX_SPREAD = 0.04
+
+# LLM-reviewed candidates: need EV/day above this to even bother asking LLM
+LLM_MIN_DAILY_EV = 0.0005    # 0.05% per day minimum to consider borderline
+
+
+# ---------------------------------------------------------------------------
+# LLM borderline review
+# ---------------------------------------------------------------------------
+
+_LLM_SYSTEM = (
+    "You are a prediction market position filter. "
+    "Given borderline trading candidates that failed soft mechanical filters, "
+    "decide which are still worth entering based on risk/reward. "
+    "Reply ONLY with a JSON array of signal_ids to APPROVE. Example: [1, 3]. "
+    "Empty array [] means reject all. No explanation needed."
+)
+
+
+def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
+    """Ask LLM to review borderline candidates that failed soft filters.
+
+    Each candidate has: signal_id, title, ev_pct, daily_ev, days_to_res,
+    volume_usd, spread_pct, filter_reason.
+    Returns set of signal IDs approved to enter despite filter violation.
+    """
+    if not candidates:
+        return set()
+
+    settings = get_settings()
+
+    # Pick first available LLM provider
+    providers = []
+    if settings.groq_api_key:
+        providers.append(("https://api.groq.com/openai/v1", settings.groq_api_key, settings.stage7_groq_model))
+    if settings.gemini_api_key:
+        providers.append((
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            settings.gemini_api_key,
+            settings.stage7_gemini_model,
+        ))
+    if settings.stage7_openai_api_key:
+        providers.append((settings.stage7_openai_api_base_url, settings.stage7_openai_api_key, settings.stage7_openai_model))
+    if not providers:
+        return set()
+
+    prompt_items = [
+        {
+            "signal_id": c["signal_id"],
+            "title": c["title"][:80],
+            "ev_pct": round(c["ev_pct"] * 100, 1),
+            "daily_ev_pct": round(c["daily_ev"] * 100, 3),
+            "days_to_resolution": round(c["days_to_res"], 0),
+            "volume_usd": round(c["volume_usd"], 0),
+            "spread_pct": round(c["spread_pct"] * 100, 1),
+            "filter_violated": c["filter_reason"],
+        }
+        for c in candidates
+    ]
+
+    for api_base, api_key, model in providers:
+        try:
+            body = json.dumps({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _LLM_SYSTEM},
+                    {"role": "user", "content": json.dumps(prompt_items)},
+                ],
+                "temperature": 0,
+                "max_tokens": 200,
+            }, ensure_ascii=True).encode("utf-8")
+            req = urllib_request.Request(
+                f"{api_base.rstrip('/')}/chat/completions",
+                data=body,
+                method="POST",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            with urllib_request.urlopen(req, timeout=15.0) as resp:  # nosec B310
+                result = json.loads(resp.read().decode("utf-8"))
+            text = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            # Parse JSON array from response
+            import re
+            match = re.search(r"\[[\d\s,]*\]", text)
+            if match:
+                approved_ids = json.loads(match.group(0))
+                logger.info("LLM borderline review approved %d/%d: %s", len(approved_ids), len(candidates), approved_ids)
+                return set(int(x) for x in approved_ids if isinstance(x, (int, float)))
+            return set()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LLM borderline review failed (%s): %s", api_base, exc)
+            continue
+
+    return set()
 
 
 # ---------------------------------------------------------------------------
@@ -215,52 +317,96 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
     now = datetime.now(UTC)
 
     # Build candidate list with computed metrics for smart sorting
-    candidates: list[tuple[Signal, Stage7AgentDecision, Market, float, float, float]] = []
+    # Separate hard-rejected, borderline (LLM review), and accepted
+    CandidateTuple = tuple  # (signal, s7, market, kelly, ev_pct, daily_ev)
+    accepted: list[CandidateTuple] = []
+    borderline: list[dict[str, Any]] = []   # for LLM review
+    borderline_map: dict[int, CandidateTuple] = {}  # signal_id → tuple
+
     for signal, s7, market in rows:
         if market.id in open_market_ids:
             skipped += 1
             continue
 
-        # --- Spread filter ---
+        # --- Compute metrics ---
         spread_pct = 0.0
         if market.best_bid_yes is not None and market.best_ask_yes is not None and market.best_ask_yes > 0:
             spread_pct = (float(market.best_ask_yes) - float(market.best_bid_yes)) / float(market.best_ask_yes)
         elif market.spread_cents is not None:
             mid = ((market.best_bid_yes or 0) + (market.best_ask_yes or 0)) / 2 or 0.5
             spread_pct = float(market.spread_cents) / 100.0 / mid
-        if spread_pct > MAX_SPREAD_PCT:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: spread {spread_pct:.1%} > max {MAX_SPREAD_PCT:.0%}")
-            continue
 
-        # --- Volume filter ---
         volume = float(market.notional_value_dollars or market.liquidity_value or 0.0)
-        if volume < MIN_VOLUME_USD:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: volume ${volume:.0f} < min ${MIN_VOLUME_USD:.0f}")
-            continue
 
-        # --- Time-to-resolution filter ---
         days_to_res = 999.0
         if market.resolution_time:
             days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
-        if days_to_res > MAX_DAYS_TO_RESOLUTION:
-            skipped += 1
-            reasons.append(f"signal {signal.id}: {days_to_res:.0f}d to resolution > max {MAX_DAYS_TO_RESOLUTION}d")
-            continue
 
         ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
         kelly = float(ev_bundle.get("kelly_fraction") or signal.confidence_score or 0.0)
         ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
         if ev_pct <= 0.0 and signal.confidence_score:
             ev_pct = float(signal.confidence_score) * 0.05
+        daily_ev = ev_pct / max(1.0, days_to_res)
 
-        # Daily EV = edge per day of capital lock — key sorting metric
-        daily_ev = ev_pct / days_to_res
-        candidates.append((signal, s7, market, kelly, ev_pct, daily_ev))
+        # --- Hard limits: always skip, no LLM override ---
+        if spread_pct > HARD_MAX_SPREAD:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: hard-reject spread {spread_pct:.1%}")
+            continue
+        if volume < HARD_MIN_VOLUME and volume > 0:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: hard-reject volume ${volume:.0f}")
+            continue
+        if days_to_res > HARD_MAX_DAYS:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: hard-reject {days_to_res:.0f}d")
+            continue
+
+        # --- Soft limits: send borderline cases to LLM ---
+        soft_violations: list[str] = []
+        if spread_pct > SOFT_MAX_SPREAD:
+            soft_violations.append(f"spread {spread_pct:.1%} > {SOFT_MAX_SPREAD:.0%}")
+        if volume < SOFT_MIN_VOLUME:
+            soft_violations.append(f"volume ${volume:.0f} < ${SOFT_MIN_VOLUME:.0f}")
+        if days_to_res > SOFT_MAX_DAYS:
+            soft_violations.append(f"{days_to_res:.0f}d > {SOFT_MAX_DAYS}d")
+
+        tup = (signal, s7, market, kelly, ev_pct, daily_ev)
+        if soft_violations and daily_ev >= LLM_MIN_DAILY_EV:
+            # Borderline: has some violation but enough EV/day to be worth LLM review
+            borderline_map[signal.id] = tup
+            borderline.append({
+                "signal_id": signal.id,
+                "title": market.title,
+                "ev_pct": ev_pct,
+                "daily_ev": daily_ev,
+                "days_to_res": days_to_res,
+                "volume_usd": volume,
+                "spread_pct": spread_pct,
+                "filter_reason": "; ".join(soft_violations),
+            })
+        elif soft_violations:
+            skipped += 1
+            reasons.append(f"signal {signal.id}: soft-reject {'; '.join(soft_violations)} (daily_ev too low)")
+        else:
+            accepted.append(tup)
+
+    # LLM reviews borderline candidates
+    if borderline:
+        llm_approved = _llm_review_borderline(borderline)
+        for sig_id, tup in borderline_map.items():
+            if sig_id in llm_approved:
+                accepted.append(tup)
+                reasons.append(f"signal {sig_id}: borderline → LLM approved")
+            else:
+                skipped += 1
+                reasons.append(f"signal {sig_id}: borderline → LLM rejected")
+
+    candidates = accepted
 
     # Sort by daily_ev descending — best return per day of capital lock first
-    candidates.sort(key=lambda x: x[5], reverse=True)
+    candidates.sort(key=lambda x: x[5], reverse=True)  # type: ignore[attr-defined]
 
     for signal, s7, market, kelly, ev_pct, daily_ev in candidates:
         position_pct = _compute_position_pct(kelly, ev_pct)
