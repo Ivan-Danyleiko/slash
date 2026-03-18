@@ -287,6 +287,15 @@ def _time_bucket_limit(days_to_res: float) -> float:
     return 0.10
 
 
+def _resolve_trade_direction(signal: Signal) -> str:
+    direction = str(signal.signal_direction or "YES").upper()
+    if direction not in ("YES", "NO"):
+        direction = "YES"
+    if str(signal.signal_mode or "").lower() == "momentum":
+        direction = "NO" if direction == "YES" else "YES"
+    return direction
+
+
 # ---------------------------------------------------------------------------
 # CLOB price fetch (reuse logic from PolymarketCollector)
 # ---------------------------------------------------------------------------
@@ -422,9 +431,14 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
             duplicates += 1
             continue
 
-        direction = str(signal.signal_direction or "YES").upper()
-        if direction not in ("YES", "NO"):
-            direction = "YES"
+        signal_mode = str(signal.signal_mode or "").lower()
+        if signal_mode == "uncertainty_liquid":
+            hard_rejected.append(
+                {"signal_id": signal.id, "title": market.title[:60], "reason": "uncertainty_liquid_disabled"}
+            )
+            continue
+
+        direction = _resolve_trade_direction(signal)
         entry_price, spread_pct = _extract_side_prices(market, direction=direction)
         is_clob = market.best_bid_yes is not None and market.best_ask_yes is not None
         if entry_price is None:
@@ -586,9 +600,9 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             reasons.append(f"signal {signal.id}: duplicate open market")
             continue
 
-        direction = str(signal.signal_direction or "YES").upper()
+        direction = str(cand.get("direction") or _resolve_trade_direction(signal)).upper()
         if direction not in ("YES", "NO"):
-            direction = "YES"
+            direction = _resolve_trade_direction(signal)
         entry_price, spread_pct = _extract_side_prices(market, direction)
         if entry_price is None:
             skipped += 1
