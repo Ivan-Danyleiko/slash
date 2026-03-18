@@ -306,49 +306,48 @@ class TelegramProductService:
                     DryrunPosition.portfolio_id == portfolio.id,
                     DryrunPosition.status == "OPEN",
                 )
-                .order_by(DryrunPosition.opened_at.desc())
-                .limit(5)
+                .order_by(DryrunPosition.resolution_deadline.asc().nullslast())
             )
         )
 
         if not open_positions:
             return "📂 *Open Positions*\n\n_No open positions\\. Run `/dryrun run` to open some\\._"
 
-        total_count = self.db.scalar(
-            select(sqlfunc.count()).select_from(DryrunPosition).where(
-                DryrunPosition.portfolio_id == portfolio.id,
-                DryrunPosition.status == "OPEN",
-            )
-        ) or 0
+        total_invested = sum(p.notional_usd for p, _ in open_positions)
+        total_max_win = sum(p.shares_count * (1.0 - p.entry_price) for p, _ in open_positions)
+        total_pnl = sum(p.unrealized_pnl_usd for p, _ in open_positions)
+        pnl_sign = "+" if total_pnl >= 0 else ""
 
-        lines = [f"📂 *Open Positions* — {total_count}", ""]
+        header = (
+            f"📂 *Open Positions* — {len(open_positions)}\n"
+            f"Вклад: `${total_invested:.2f}` \\| Макс виграш: `+${total_max_win:.2f}` \\| P&L: `{pnl_sign}${total_pnl:.2f}`"
+        )
 
-        nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-        for i, (pos, market) in enumerate(open_positions):
+        # Table in code block (no escaping needed inside ```)
+        rows = ["#   Dir  Koef   Вклад  Макс    EV     P&L    Дата"]
+        rows.append("─" * 55)
+        for i, (pos, market) in enumerate(open_positions, 1):
             mark = pos.mark_price or pos.entry_price
-            pnl = pos.unrealized_pnl_usd
-            pnl_sign = "+" if pnl >= 0 else ""
+            koef = 1.0 / pos.entry_price if pos.entry_price > 0 else 0.0
+            max_win = pos.shares_count * (1.0 - pos.entry_price)
+            ev = pos.entry_ev_pct or 0.0
             pnl_pct = (mark - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
-            pnl_pct_sign = "+" if pnl_pct >= 0 else ""
-            direction_icon = "🟢" if pos.direction == "YES" else "🔴"
-            title = self._esc(market.title[:55]) if market else "Unknown"
-            deadline_str = ""
-            if pos.resolution_deadline:
-                _dl = pos.resolution_deadline.strftime("%Y-%m-%d").replace("-", "\\-")
-                deadline_str = f"\n⏳ `{_dl}`"
-            kelly_str = f"Kelly `{(pos.entry_kelly_fraction or 0)*100:.1f}%`" if pos.entry_kelly_fraction else ""
-            lines += [
-                f"{nums[i]} {direction_icon} *{pos.direction}* · {self._esc(pos.platform)}",
-                f"_{title}_",
-                f"Entry `${pos.entry_price:.3f}` → Now `${mark:.3f}`  `{pnl_sign}${pnl:.2f}` \\(`{pnl_pct_sign}{pnl_pct:.1f}%`\\)",
-                f"`${pos.notional_usd:.2f}` · `{pos.shares_count:.2f}` shares" + (f" · {kelly_str}" if kelly_str else "") + deadline_str,
-                "",
-            ]
+            dl = pos.resolution_deadline.strftime("%b %d") if pos.resolution_deadline else "  —  "
+            ev_str = f"{'+' if ev >= 0 else ''}{ev:.0f}%"
+            pnl_str = f"{'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
+            rows.append(
+                f"{i:<3} {pos.direction:<3}  {koef:.2f}x  ${pos.notional_usd:<5.2f}  +${max_win:<5.2f}  {ev_str:<6}  {pnl_str:<6}  {dl}"
+            )
 
-        if total_count > 5:
-            lines.append(f"_\\.\\.\\. \\+{total_count - 5} more positions_")
+        # Titles block — short list after table
+        titles_lines = [""]
+        for i, (pos, market) in enumerate(open_positions, 1):
+            title = (market.title[:50] if market else "Unknown").replace("Arbitrage candidate: ", "")
+            dl = pos.resolution_deadline.strftime("%b %d") if pos.resolution_deadline else "no date"
+            titles_lines.append(f"{i}\\. _{self._esc(title[:48])}_")
 
-        return "\n".join(lines)
+        table_block = "```\n" + "\n".join(rows) + "\n```"
+        return header + "\n\n" + table_block + "\n" + "\n".join(titles_lines)
 
     def get_dryrun_pnl_text(self) -> str:
         portfolio = self._get_dryrun_portfolio()
