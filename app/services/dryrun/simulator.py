@@ -272,7 +272,8 @@ def _estimate_our_prob_yes(signal: Signal, s7: Stage7AgentDecision, market: Mark
     if str(signal.signal_mode or "").lower() == "momentum":
         current = float(market.probability_yes or 0.5)
         move = float(meta.get("price_move") or 0.0)
-        return min(0.95, max(0.05, current + move * 0.3))
+        # Mean-reversion for momentum mode: after a sharp move, expect partial pullback.
+        return min(0.95, max(0.05, current - move * 0.3))
 
     return min(0.95, max(0.05, float(market.probability_yes or 0.5)))
 
