@@ -19,7 +19,14 @@ class Settings(BaseSettings):
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
     # Comma-separated list of extra admin Telegram user IDs (e.g. "123456,789012")
     telegram_admin_ids: str = Field(default="", alias="TELEGRAM_ADMIN_IDS")
-    admin_api_key: str = Field(default="change-me", alias="ADMIN_API_KEY")
+    admin_api_key: str = Field(default="", alias="ADMIN_API_KEY")
+    admin_write_min_interval_ms: int = Field(default=250, alias="ADMIN_WRITE_MIN_INTERVAL_MS")
+    admin_read_min_interval_ms: int = Field(default=100, alias="ADMIN_READ_MIN_INTERVAL_MS")
+    admin_heavy_get_cache_ttl_sec: int = Field(default=30, alias="ADMIN_HEAVY_GET_CACHE_TTL_SEC")
+    dryrun_manual_min_run_interval_sec: int = Field(default=20, alias="DRYRUN_MANUAL_MIN_RUN_INTERVAL_SEC")
+    dryrun_report_cache_ttl_sec: int = Field(default=5, alias="DRYRUN_REPORT_CACHE_TTL_SEC")
+    user_identity_hmac_secret: str = Field(default="", alias="USER_IDENTITY_HMAC_SECRET")
+    user_identity_max_skew_sec: int = Field(default=300, alias="USER_IDENTITY_MAX_SKEW_SEC")
 
     manifold_api_base_url: str = Field(
         default="https://api.manifold.markets/v0", alias="MANIFOLD_API_BASE_URL"
@@ -124,6 +131,12 @@ class Settings(BaseSettings):
     signal_arbitrage_min_manifold_candidates: int = Field(
         default=10, alias="SIGNAL_ARBITRAGE_MIN_MANIFOLD_CANDIDATES"
     )
+    signal_sources_enabled: str = Field(
+        default="POLYMARKET,MANIFOLD", alias="SIGNAL_SOURCES_ENABLED"
+    )
+    signal_manifold_max_per_cycle: int = Field(
+        default=20, alias="SIGNAL_MANIFOLD_MAX_PER_CYCLE"
+    )
     signal_arbitrage_exclude_keywords: str = Field(
         default="coinflip,coin flip,lottery,dice,die roll,random,daily coin,daily coin flip,free lottery",
         alias="SIGNAL_ARBITRAGE_EXCLUDE_KEYWORDS",
@@ -225,6 +238,22 @@ class Settings(BaseSettings):
         alias="STAGE7_ENSEMBLE_MODELS",
     )
     stage7_ensemble_voting: str = Field(default="majority", alias="STAGE7_ENSEMBLE_VOTING")
+    stage7_portfolio_context_enabled: bool = Field(
+        default=True,
+        alias="STAGE7_PORTFOLIO_CONTEXT_ENABLED",
+    )
+    stage7_historical_rag_enabled: bool = Field(
+        default=True,
+        alias="STAGE7_HISTORICAL_RAG_ENABLED",
+    )
+    stage7_historical_rag_min_similar: int = Field(
+        default=2,
+        alias="STAGE7_HISTORICAL_RAG_MIN_SIMILAR",
+    )
+    stage7_historical_rag_limit: int = Field(
+        default=3,
+        alias="STAGE7_HISTORICAL_RAG_LIMIT",
+    )
     stage8_policy_profile: str = Field(default="bootstrap_v1", alias="STAGE8_POLICY_PROFILE")
     stage8_policy_version: str = Field(default="stage8_bootstrap_v1", alias="STAGE8_POLICY_VERSION")
     stage8_category_confidence_floor: float = Field(
@@ -267,6 +296,14 @@ class Settings(BaseSettings):
     stage11_clob_private_key: str = Field(default="", alias="STAGE11_CLOB_PRIVATE_KEY")
     stage11_clob_funder_address: str = Field(default="", alias="STAGE11_CLOB_FUNDER_ADDRESS")
     stage11_clob_chain_id: int = Field(default=137, alias="STAGE11_CLOB_CHAIN_ID")
+    dryrun_cross_platform_prob_weight: float = Field(
+        default=0.60,
+        alias="DRYRUN_CROSS_PLATFORM_PROB_WEIGHT",
+    )
+    dryrun_cross_platform_min_diff: float = Field(
+        default=0.05,
+        alias="DRYRUN_CROSS_PLATFORM_MIN_DIFF",
+    )
     stage7_openai_api_base_url: str = Field(
         default="https://api.openai.com/v1",
         alias="STAGE7_OPENAI_API_BASE_URL",

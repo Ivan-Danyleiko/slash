@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.core.secrets import redact_text
 
 
 def _numeric_metrics(metrics: dict[str, Any]) -> dict[str, float]:
@@ -58,7 +59,7 @@ def record_stage5_experiment(
                     mlflow.set_tags({k: str(v) for k, v in tags.items()})
             mlflow_logged = True
         except Exception as exc:  # pragma: no cover
-            mlflow_error = str(exc)
+            mlflow_error = redact_text(str(exc), max_len=200)
 
     return {
         "tracking_enabled": True,

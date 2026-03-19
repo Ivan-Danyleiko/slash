@@ -65,6 +65,54 @@ def _ai_summary(portfolio: DryrunPortfolio, stats: dict[str, Any], open_count: i
     return " ".join(lines)
 
 
+def get_portfolio_snapshot(db: Session) -> dict[str, Any]:
+    """Compact portfolio state for Stage7 portfolio-aware context."""
+    portfolio = get_or_create_portfolio(db)
+    now = datetime.now(UTC)
+    open_rows = list(
+        db.execute(
+            select(DryrunPosition, Market)
+            .join(Market, Market.id == DryrunPosition.market_id)
+            .where(
+                DryrunPosition.portfolio_id == portfolio.id,
+                DryrunPosition.status == "OPEN",
+            )
+        )
+    )
+    open_notional = sum(float(pos.notional_usd or 0.0) for pos, _ in open_rows)
+    open_pct = open_notional / max(float(portfolio.initial_balance_usd), 1.0)
+
+    category_breakdown: dict[str, int] = {}
+    bucket_breakdown: dict[str, float] = {"0_14d": 0.0, "15_45d": 0.0, "46_90d": 0.0, "91_180d": 0.0}
+    for pos, market in open_rows:
+        category = str(market.category or "other").strip().lower() or "other"
+        category_breakdown[category] = category_breakdown.get(category, 0) + 1
+        days_to_res = 999.0
+        if market.resolution_time:
+            base_now = now if market.resolution_time.tzinfo is not None else now.replace(tzinfo=None)
+            days_to_res = max(0.0, (market.resolution_time - base_now).total_seconds() / 86400.0)
+        if days_to_res <= 14:
+            bucket_breakdown["0_14d"] += float(pos.notional_usd or 0.0)
+        elif days_to_res <= 45:
+            bucket_breakdown["15_45d"] += float(pos.notional_usd or 0.0)
+        elif days_to_res <= 90:
+            bucket_breakdown["46_90d"] += float(pos.notional_usd or 0.0)
+        else:
+            bucket_breakdown["91_180d"] += float(pos.notional_usd or 0.0)
+
+    base = max(float(portfolio.initial_balance_usd), 1.0)
+    bucket_breakdown_pct = {k: round(v / base, 4) for k, v in bucket_breakdown.items()}
+    return {
+        "open_positions": len(open_rows),
+        "cash_usd": round(float(portfolio.current_cash_usd), 4),
+        "initial_balance_usd": float(portfolio.initial_balance_usd),
+        "open_positions_usd": round(open_notional, 4),
+        "open_positions_pct": round(open_pct, 4),
+        "category_breakdown": category_breakdown,
+        "bucket_breakdown_pct": bucket_breakdown_pct,
+    }
+
+
 def build_report(db: Session) -> dict[str, Any]:
     portfolio = get_or_create_portfolio(db)
 

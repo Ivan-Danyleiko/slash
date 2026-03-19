@@ -5,8 +5,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base
 from app.models.enums import SignalType
-from app.models.models import DryrunPosition, Market, Platform, Signal, Stage7AgentDecision
-from app.services.dryrun.reporter import build_report
+from app.models.models import DuplicateMarketPair, DryrunPosition, Market, Platform, Signal, Stage7AgentDecision
+from app.services.dryrun.cross_platform import get_cross_platform_prob
+from app.services.dryrun.reporter import build_report, get_portfolio_snapshot
 from app.services.dryrun.kelly import kelly_fraction, portfolio_kelly_adjustment
 from app.services.dryrun.scorer import composite_score
 from app.services.dryrun.simulator import _load_latest_keep_rows, get_or_create_portfolio, refresh_mark_prices
@@ -46,12 +47,16 @@ def test_kelly_fraction_binary_market_fractional() -> None:
 
 
 def test_portfolio_kelly_adjustment_respects_remaining_capacity() -> None:
-    # near capacity should downscale
+    # near capacity (87.5% fill) → capped at remaining_capacity=0.05
     adjusted = portfolio_kelly_adjustment(base_kelly=0.08, total_open_notional_pct=0.35, max_total_exposure=0.40)
-    assert 0.0 <= adjusted <= 0.05
+    assert 0.0 <= adjusted <= 0.051  # remaining_capacity cap, float tolerance
 
     # at full capacity should block
     assert portfolio_kelly_adjustment(base_kelly=0.05, total_open_notional_pct=0.40, max_total_exposure=0.40) == 0.0
+
+    # well below capacity → no scaling applied
+    adjusted_free = portfolio_kelly_adjustment(base_kelly=0.05, total_open_notional_pct=0.30, max_total_exposure=0.80)
+    assert adjusted_free == 0.05
 
 
 def _mk_db() -> Session:
@@ -226,3 +231,103 @@ def test_brier_score_for_no_position_uses_yes_coordinate() -> None:
     rep = build_report(db)
     # y_pred_yes=0.60, y_true_yes=1.0 => (0.4)^2 = 0.16
     assert abs(float(rep["stats"]["brier_score"]) - 0.16) < 1e-6
+
+
+def test_cross_platform_prob_uses_duplicate_pairs_and_weights() -> None:
+    db = _mk_db()
+    now = datetime.now(UTC)
+    p_poly = Platform(name="POLYMARKET", base_url="https://poly")
+    p_man = Platform(name="MANIFOLD", base_url="https://manifold")
+    db.add_all([p_poly, p_man])
+    db.flush()
+
+    base = Market(
+        platform_id=p_poly.id,
+        external_market_id="base",
+        title="base",
+        probability_yes=0.40,
+        volume_24h=10_000.0,
+        fetched_at=now,
+    )
+    other = Market(
+        platform_id=p_man.id,
+        external_market_id="other",
+        title="other",
+        probability_yes=0.60,
+        volume_24h=20_000.0,
+        fetched_at=now,
+    )
+    same_platform = Market(
+        platform_id=p_poly.id,
+        external_market_id="same",
+        title="same",
+        probability_yes=0.90,
+        volume_24h=20_000.0,
+        fetched_at=now,
+    )
+    db.add_all([base, other, same_platform])
+    db.flush()
+
+    db.add_all(
+        [
+            DuplicateMarketPair(
+                market_a_id=base.id,
+                market_b_id=other.id,
+                similarity_score=100.0,
+                divergence_score=0.2,
+            ),
+            DuplicateMarketPair(
+                market_a_id=base.id,
+                market_b_id=same_platform.id,
+                similarity_score=100.0,
+                divergence_score=0.5,
+            ),
+        ]
+    )
+    db.commit()
+
+    out = get_cross_platform_prob(db, market=base)
+    assert out is not None
+    assert out["contributors"] == 1
+    assert out["sources"] == ["manifold"]
+    assert abs(float(out["cross_prob"]) - 0.60) < 1e-9
+
+
+def test_portfolio_snapshot_contains_category_and_bucket_breakdown() -> None:
+    db = _mk_db()
+    now = datetime.now(UTC)
+    p = Platform(name="POLYMARKET", base_url="https://poly")
+    db.add(p)
+    db.flush()
+    m = Market(
+        platform_id=p.id,
+        external_market_id="snap1",
+        title="snapshot market",
+        probability_yes=0.55,
+        category="crypto",
+        fetched_at=now,
+        resolution_time=now + timedelta(days=10),
+    )
+    db.add(m)
+    db.flush()
+    portfolio = get_or_create_portfolio(db)
+    db.add(
+        DryrunPosition(
+            portfolio_id=portfolio.id,
+            market_id=m.id,
+            direction="YES",
+            entry_price=0.5,
+            mark_price=0.5,
+            notional_usd=5.0,
+            shares_count=10.0,
+            status="OPEN",
+            open_reason="kelly=0.02,peak=0.500000",
+            opened_at=now - timedelta(days=1),
+        )
+    )
+    db.commit()
+
+    snap = get_portfolio_snapshot(db)
+    assert snap["open_positions"] == 1
+    assert snap["category_breakdown"].get("crypto") == 1
+    assert float(snap["bucket_breakdown_pct"]["0_14d"]) > 0.0

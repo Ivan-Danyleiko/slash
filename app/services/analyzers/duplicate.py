@@ -426,6 +426,7 @@ class DuplicateDetector:
         normalized = {m.id: self._canonical_text(m.title) for m in markets}
         compact = {m.id: self._compact_title(m.title) for m in markets}
         tokens = {m.id: self._meaningful_tokens(m.title) for m in markets}
+        title_quality_ok = {m.id: len(tokens[m.id]) >= 3 for m in markets}
         doc_freq: dict[str, int] = {}
         total_docs = max(1, len(markets))
         for token_set in tokens.values():
@@ -435,8 +436,13 @@ class DuplicateDetector:
 
         for idx, a in enumerate(markets):
             for b in markets[idx + 1 :]:
-                if not self._comparable(a, b):
+                if a.platform_id == b.platform_id:
                     continue
+                if not title_quality_ok.get(a.id, False) or not title_quality_ok.get(b.id, False):
+                    continue
+                if a.resolution_time and b.resolution_time:
+                    if abs(a.resolution_time - b.resolution_time) > timedelta(days=self.resolution_window_days):
+                        continue
                 overlap_tokens = tokens[a.id] & tokens[b.id]
                 overlap = len(overlap_tokens)
                 if overlap < self.min_overlap:
@@ -505,6 +511,13 @@ class DuplicateDetector:
         normalized = {m_id: self._canonical_text(m.title) for m_id, m in all_markets.items()}
         compact = {m_id: self._compact_title(m.title) for m_id, m in all_markets.items()}
         tokens = {m_id: self._meaningful_tokens(m.title) for m_id, m in all_markets.items()}
+        title_quality_ok = {m_id: len(tok) >= 3 for m_id, tok in tokens.items()}
+        candidate_by_id = {int(m.id): m for m in candidates}
+        candidate_token_index: dict[str, set[int]] = {}
+        for m in candidates:
+            mid = int(m.id)
+            for token in tokens.get(mid, set()):
+                candidate_token_index.setdefault(token, set()).add(mid)
         doc_freq: dict[str, int] = {}
         total_docs = max(1, len(all_markets))
         for token_set in tokens.values():
@@ -514,7 +527,16 @@ class DuplicateDetector:
 
         seen: set[tuple[int, int]] = set()
         for a in anchors:
-            for b in candidates:
+            candidate_overlap_counts: dict[int, int] = {}
+            for token in tokens.get(int(a.id), set()):
+                for candidate_id in candidate_token_index.get(token, set()):
+                    candidate_overlap_counts[candidate_id] = candidate_overlap_counts.get(candidate_id, 0) + 1
+            for candidate_id, shared_count in candidate_overlap_counts.items():
+                if shared_count < self.min_overlap:
+                    continue
+                b = candidate_by_id.get(candidate_id)
+                if b is None:
+                    continue
                 if a.id == b.id:
                     continue
                 lo, hi = (a.id, b.id) if a.id < b.id else (b.id, a.id)
@@ -524,8 +546,13 @@ class DuplicateDetector:
                 seen.add(key)
                 if len(pairs) >= max_pairs:
                     return pairs
-                if not self._comparable(a, b):
+                if a.platform_id == b.platform_id:
                     continue
+                if not title_quality_ok.get(a.id, False) or not title_quality_ok.get(b.id, False):
+                    continue
+                if a.resolution_time and b.resolution_time:
+                    if abs(a.resolution_time - b.resolution_time) > timedelta(days=self.resolution_window_days):
+                        continue
                 overlap_tokens = tokens[a.id] & tokens[b.id]
                 overlap = len(overlap_tokens)
                 if overlap < self.min_overlap:

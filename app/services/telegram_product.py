@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func as sqlfunc, select
 from sqlalchemy.orm import Session
 
@@ -33,7 +34,16 @@ class TelegramProductService:
 
     def add_watchlist(self, user: User, market_id: int) -> tuple[bool, str]:
         limits = PLAN_LIMITS[user.access_level]
-        existing_count = len(list(self.db.scalars(select(WatchlistItem).where(WatchlistItem.user_id == user.id))))
+        # Serialize watchlist mutations per user to avoid concurrent limit bypass.
+        self.db.scalar(select(User).where(User.id == user.id).with_for_update())
+        existing_count = int(
+            self.db.scalar(
+                select(sqlfunc.count())
+                .select_from(WatchlistItem)
+                .where(WatchlistItem.user_id == user.id)
+            )
+            or 0
+        )
         if existing_count >= limits["watchlist"]:
             return False, f"Watchlist limit reached for {user.access_level.value}"
         existing = self.db.scalar(
@@ -47,8 +57,13 @@ class TelegramProductService:
         variant = get_ab_variant_for_user(user_id=user.id)
         payload = {"variant": variant} if variant else None
         self.db.add(UserEvent(user_id=user.id, event_type="watchlist_added", market_id=market_id, payload_json=payload))
-        self.db.commit()
-        return True, "Added"
+        try:
+            self.db.commit()
+            return True, "Added"
+        except IntegrityError:
+            # Unique constraint (user_id, market_id) race-safe fallback.
+            self.db.rollback()
+            return True, "Already in watchlist"
 
     def remove_watchlist(self, user: User, market_id: int) -> bool:
         item = self.db.scalar(

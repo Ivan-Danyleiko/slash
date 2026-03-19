@@ -330,6 +330,12 @@ class SignalEngine:
         excluded_tokens = [
             x.strip().lower() for x in self.settings.signal_arbitrage_exclude_keywords.split(",") if x.strip()
         ]
+        enabled_sources = {
+            x.strip().upper()
+            for x in str(self.settings.signal_sources_enabled or "").split(",")
+            if x.strip()
+        }
+        known_signal_sources = {"POLYMARKET", "MANIFOLD", "METACULUS", "KALSHI"}
         for pair in pairs:
             duplicate_attempted += 1
             pair_liquidity = self._pair_liquidity_score(
@@ -555,6 +561,8 @@ class SignalEngine:
             platform_name = str(
                 (market.source_payload or {}).get("platform") or platform_by_id.get(market.platform_id) or ""
             ).upper()
+            if enabled_sources and platform_name in known_signal_sources and platform_name not in enabled_sources:
+                continue
             is_manifold = platform_name == "MANIFOLD"
             min_liquidity = (
                 self.settings.signal_arbitrage_min_liquidity_manifold
@@ -607,9 +615,11 @@ class SignalEngine:
         arbitrage_candidates.sort(key=lambda x: x[1], reverse=True)
         max_candidates = max(1, int(self.settings.signal_arbitrage_max_candidates))
         manifold_quota = max(0, int(self.settings.signal_arbitrage_min_manifold_candidates))
+        manifold_max = max(0, int(self.settings.signal_manifold_max_per_cycle))
         manifold_quota = min(manifold_quota, max_candidates)
         selected: list[tuple[Market, float, float, float, str, float, float, str]] = []
         selected_market_ids: set[int] = set()
+        selected_manifold = 0
         if manifold_quota > 0:
             for cand in arbitrage_candidates:
                 market = cand[0]
@@ -618,17 +628,25 @@ class SignalEngine:
                     continue
                 if market.id in selected_market_ids:
                     continue
+                if manifold_max > 0 and selected_manifold >= manifold_max:
+                    break
                 selected.append(cand)
                 selected_market_ids.add(market.id)
+                selected_manifold += 1
                 if len(selected) >= manifold_quota:
                     break
         if len(selected) < max_candidates:
             for cand in arbitrage_candidates:
                 market = cand[0]
+                platform_name = cand[7]
                 if market.id in selected_market_ids:
+                    continue
+                if platform_name == "MANIFOLD" and manifold_max > 0 and selected_manifold >= manifold_max:
                     continue
                 selected.append(cand)
                 selected_market_ids.add(market.id)
+                if platform_name == "MANIFOLD":
+                    selected_manifold += 1
                 if len(selected) >= max_candidates:
                     break
 

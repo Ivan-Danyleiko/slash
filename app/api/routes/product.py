@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_user_id
 from app.db.session import get_db
 from app.services.telegram_product import TelegramProductService
 
@@ -14,7 +15,7 @@ def _user_context(db: Session, x_user_id: str, x_username: str | None = None):
 
 @router.get("/watchlist")
 def watchlist(
-    x_user_id: str = Header(default="demo-user"),
+    x_user_id: str = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -25,7 +26,7 @@ def watchlist(
 @router.post("/watchlist/add")
 def watchlist_add(
     market_id: int,
-    x_user_id: str = Header(default="demo-user"),
+    x_user_id: str = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -37,7 +38,7 @@ def watchlist_add(
 @router.post("/watchlist/remove")
 def watchlist_remove(
     market_id: int,
-    x_user_id: str = Header(default="demo-user"),
+    x_user_id: str = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -48,7 +49,7 @@ def watchlist_remove(
 
 @router.get("/digest")
 def digest(
-    x_user_id: str = Header(default="demo-user"),
+    x_user_id: str = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -58,7 +59,7 @@ def digest(
 
 @router.get("/user")
 def user(
-    x_user_id: str = Header(default="demo-user"),
+    x_user_id: str = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:

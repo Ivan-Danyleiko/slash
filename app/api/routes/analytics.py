@@ -2,12 +2,16 @@ from datetime import UTC, datetime, timedelta
 import csv
 from io import StringIO
 from math import log
+import threading
+import time
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.api.deps import require_admin, require_admin_read_throttle, require_admin_write_throttle
 from app.models.enums import SignalType
 from app.db.session import get_db
 from app.models.models import (
@@ -196,6 +200,31 @@ from app.services.agent_stage8 import (
 from app.services.signals.ranking import select_top_signals
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+_HEAVY_GET_CACHE_LOCK = threading.Lock()
+_HEAVY_GET_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached_heavy_get(*, key: str, ttl_sec: int, builder: Callable[[], Any]) -> Any:
+    ttl = max(1, int(ttl_sec))
+    now = time.monotonic()
+    with _HEAVY_GET_CACHE_LOCK:
+        if len(_HEAVY_GET_CACHE) > 1000:
+            stale_keys = [k for k, (exp_ts, _) in _HEAVY_GET_CACHE.items() if exp_ts < now]
+            for k in stale_keys[:500]:
+                _HEAVY_GET_CACHE.pop(k, None)
+            if len(_HEAVY_GET_CACHE) > 1200:
+                for k, _ in sorted(_HEAVY_GET_CACHE.items(), key=lambda kv: kv[1][0])[:200]:
+                    _HEAVY_GET_CACHE.pop(k, None)
+        cached = _HEAVY_GET_CACHE.get(key)
+        if cached is not None:
+            exp_ts, payload = cached
+            if now <= exp_ts:
+                return payload
+            _HEAVY_GET_CACHE.pop(key, None)
+    payload = builder()
+    with _HEAVY_GET_CACHE_LOCK:
+        _HEAVY_GET_CACHE[key] = (now + ttl, payload)
+    return payload
 
 
 def _parse_thresholds_csv(thresholds: str) -> list[float]:
@@ -813,7 +842,7 @@ def signal_history_stats(days: int = 7, db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.get("/research/signals")
+@router.get("/research/signals", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_signals(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -835,7 +864,7 @@ def research_signals(
     return result
 
 
-@router.get("/research/signals.csv")
+@router.get("/research/signals.csv", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_signals_csv(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -886,7 +915,7 @@ def research_signals_csv(
     )
 
 
-@router.get("/research/divergence-thresholds")
+@router.get("/research/divergence-thresholds", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_divergence_thresholds(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -907,7 +936,7 @@ def research_divergence_thresholds(
     return result
 
 
-@router.get("/research/progress")
+@router.get("/research/progress", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_progress(
     target_samples: int = Query(default=500, ge=50, le=50000),
     lookback_days: int = Query(default=7, ge=1, le=90),
@@ -949,7 +978,7 @@ def research_progress(
     }
 
 
-@router.get("/research/agent-decisions")
+@router.get("/research/agent-decisions", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_agent_decisions(
     days: int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=200, ge=1, le=2000),
@@ -964,7 +993,7 @@ def research_agent_decisions(
     )
 
 
-@router.get("/research/divergence-decision")
+@router.get("/research/divergence-decision", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_divergence_decision(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1002,7 +1031,7 @@ def research_divergence_decision(
     return result
 
 
-@router.post("/research/divergence-decision/track")
+@router.post("/research/divergence-decision/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_divergence_decision_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1072,14 +1101,14 @@ def research_divergence_decision_track(
     return {"decision": decision, "tracking": tracking}
 
 
-@router.get("/research/experiments")
+@router.get("/research/experiments", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_experiments(
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> dict:
     return read_stage5_experiments(limit=limit)
 
 
-@router.get("/research/data-quality")
+@router.get("/research/data-quality", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_data_quality(
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=10000, ge=1, le=100000),
@@ -1088,7 +1117,7 @@ def research_data_quality(
     return build_signal_history_data_quality_report(db, days=days, limit=limit)
 
 
-@router.post("/research/data-quality/track")
+@router.post("/research/data-quality/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_data_quality_track(
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=10000, ge=1, le=100000),
@@ -1109,7 +1138,7 @@ def research_data_quality_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/provider-reliability")
+@router.get("/research/provider-reliability", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_provider_reliability(
     days: int = Query(default=7, ge=1, le=365),
     limit_runs: int = Query(default=1000, ge=1, le=10000),
@@ -1118,7 +1147,7 @@ def research_provider_reliability(
     return build_provider_reliability_report(db, days=days, limit_runs=limit_runs)
 
 
-@router.post("/research/provider-reliability/track")
+@router.post("/research/provider-reliability/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_provider_reliability_track(
     days: int = Query(default=7, ge=1, le=365),
     limit_runs: int = Query(default=1000, ge=1, le=10000),
@@ -1135,7 +1164,7 @@ def research_provider_reliability_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/provider-contract-checks")
+@router.get("/research/provider-contract-checks", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_provider_contract_checks(
     limit: int = Query(default=20, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -1171,22 +1200,22 @@ def research_provider_contract_checks(
     }
 
 
-@router.get("/research/stack-decision-log")
+@router.get("/research/stack-decision-log", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stack_decision_log() -> dict:
     return build_stack_decision_log()
 
 
-@router.get("/research/stack-readiness")
+@router.get("/research/stack-readiness", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stack_readiness() -> dict:
     return build_research_stack_readiness_report()
 
 
-@router.get("/research/build-vs-buy-estimate")
+@router.get("/research/build-vs-buy-estimate", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_build_vs_buy_estimate() -> dict:
     return build_build_vs_buy_time_saved_estimate()
 
 
-@router.post("/research/build-vs-buy-estimate/track")
+@router.post("/research/build-vs-buy-estimate/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_build_vs_buy_estimate_track(
     run_name: str = Query(default="stage5_build_vs_buy_estimate"),
 ) -> dict:
@@ -1200,7 +1229,7 @@ def research_build_vs_buy_estimate_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/ab-testing")
+@router.get("/research/ab-testing", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_ab_testing(
     days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
@@ -1208,7 +1237,7 @@ def research_ab_testing(
     return build_ab_testing_report(db, days=days)
 
 
-@router.post("/research/ab-testing/track")
+@router.post("/research/ab-testing/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_ab_testing_track(
     days: int = Query(default=30, ge=1, le=365),
     run_name: str = Query(default="stage5_ab_testing"),
@@ -1227,7 +1256,7 @@ def research_ab_testing_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/ethics")
+@router.get("/research/ethics", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_ethics(
     top_window: int = Query(default=50, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -1235,7 +1264,7 @@ def research_ethics(
     return build_ethics_report(db, top_window=top_window)
 
 
-@router.post("/research/ethics/track")
+@router.post("/research/ethics/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_ethics_track(
     top_window: int = Query(default=50, ge=1, le=500),
     run_name: str = Query(default="stage5_ethics"),
@@ -1251,7 +1280,7 @@ def research_ethics_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/ranking-formulas")
+@router.get("/research/ranking-formulas", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_ranking_formulas(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1268,7 +1297,7 @@ def research_ranking_formulas(
     )
 
 
-@router.post("/research/ranking-formulas/track")
+@router.post("/research/ranking-formulas/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_ranking_formulas_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1299,7 +1328,7 @@ def research_ranking_formulas_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/platform-comparison")
+@router.get("/research/platform-comparison", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_platform_comparison(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1319,7 +1348,7 @@ def research_platform_comparison(
     return result
 
 
-@router.get("/research/market-categories")
+@router.get("/research/market-categories", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_market_categories(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1408,7 +1437,7 @@ def research_market_categories(
     }
 
 
-@router.post("/research/platform-comparison/track")
+@router.post("/research/platform-comparison/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_platform_comparison_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1441,7 +1470,7 @@ def research_platform_comparison_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/signal-types")
+@router.get("/research/signal-types", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_signal_types(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1471,7 +1500,7 @@ def research_signal_types(
     return report
 
 
-@router.post("/research/signal-types/track")
+@router.post("/research/signal-types/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_signal_types_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1519,7 +1548,7 @@ def research_signal_types_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/signal-types/optimize")
+@router.get("/research/signal-types/optimize", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_signal_types_optimize(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1565,7 +1594,7 @@ def research_signal_types_optimize(
     return report
 
 
-@router.post("/research/signal-types/optimize/track")
+@router.post("/research/signal-types/optimize/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_signal_types_optimize_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1631,7 +1660,7 @@ def research_signal_types_optimize_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/event-clusters")
+@router.get("/research/event-clusters", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_event_clusters(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1657,7 +1686,7 @@ def research_event_clusters(
     return report
 
 
-@router.post("/research/event-clusters/track")
+@router.post("/research/event-clusters/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_event_clusters_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1699,7 +1728,7 @@ def research_event_clusters_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/signal-lifetime")
+@router.get("/research/signal-lifetime", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_signal_lifetime(
     days: int = Query(default=30, ge=1, le=365),
     signal_type: str | None = Query(default=None),
@@ -1727,7 +1756,7 @@ def research_signal_lifetime(
     return report
 
 
-@router.post("/research/signal-lifetime/track")
+@router.post("/research/signal-lifetime/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_signal_lifetime_track(
     days: int = Query(default=30, ge=1, le=365),
     signal_type: str | None = Query(default=None),
@@ -1772,7 +1801,7 @@ def research_signal_lifetime_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/walkforward")
+@router.get("/research/walkforward", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_walkforward(
     days: int = Query(default=90, ge=14, le=365),
     horizon: str = Query(default="6h"),
@@ -1802,7 +1831,7 @@ def research_walkforward(
     return report
 
 
-@router.post("/research/walkforward/track")
+@router.post("/research/walkforward/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_walkforward_track(
     days: int = Query(default=90, ge=14, le=365),
     horizon: str = Query(default="6h"),
@@ -1850,7 +1879,7 @@ def research_walkforward_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/liquidity-safety")
+@router.get("/research/liquidity-safety", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_liquidity_safety(
     days: int = Query(default=30, ge=1, le=365),
     signal_type: str | None = Query(default=None),
@@ -1872,7 +1901,7 @@ def research_liquidity_safety(
     return report
 
 
-@router.post("/research/liquidity-safety/track")
+@router.post("/research/liquidity-safety/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_liquidity_safety_track(
     days: int = Query(default=30, ge=1, le=365),
     signal_type: str | None = Query(default=None),
@@ -1908,7 +1937,7 @@ def research_liquidity_safety_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/final-report")
+@router.get("/research/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_final_report(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1923,7 +1952,7 @@ def research_final_report(
     )
 
 
-@router.post("/research/final-report/track")
+@router.post("/research/final-report/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_final_report_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1951,7 +1980,7 @@ def research_final_report_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/export-package")
+@router.get("/research/export-package", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_export_package(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -1968,7 +1997,7 @@ def research_export_package(
     )
 
 
-@router.get("/research/export-package.csv")
+@router.get("/research/export-package.csv", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_export_package_csv(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2008,7 +2037,7 @@ def research_export_package_csv(
     )
 
 
-@router.get("/research/readiness-gate")
+@router.get("/research/readiness-gate", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_readiness_gate(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2035,7 +2064,7 @@ def research_readiness_gate(
     )
 
 
-@router.post("/research/readiness-gate/track")
+@router.post("/research/readiness-gate/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_readiness_gate_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2081,7 +2110,7 @@ def research_readiness_gate_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage6-governance")
+@router.get("/research/stage6-governance", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage6_governance(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2108,7 +2137,7 @@ def research_stage6_governance(
     )
 
 
-@router.post("/research/stage6-governance/track")
+@router.post("/research/stage6-governance/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage6_governance_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2157,7 +2186,7 @@ def research_stage6_governance_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage6-risk-guardrails")
+@router.get("/research/stage6-risk-guardrails", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage6_risk_guardrails(
     days: int = Query(default=7, ge=1, le=60),
     horizon: str = Query(default="6h"),
@@ -2183,7 +2212,7 @@ def research_stage6_risk_guardrails(
     return report
 
 
-@router.post("/research/stage6-risk-guardrails/track")
+@router.post("/research/stage6-risk-guardrails/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage6_risk_guardrails_track(
     days: int = Query(default=7, ge=1, le=60),
     horizon: str = Query(default="6h"),
@@ -2228,7 +2257,7 @@ def research_stage6_risk_guardrails_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage6-type35")
+@router.get("/research/stage6-type35", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage6_type35(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2255,7 +2284,7 @@ def research_stage6_type35(
     )
 
 
-@router.post("/research/stage6-type35/track")
+@router.post("/research/stage6-type35/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage6_type35_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2301,7 +2330,7 @@ def research_stage6_type35_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage6-final-report")
+@router.get("/research/stage6-final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage6_final_report(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2316,7 +2345,7 @@ def research_stage6_final_report(
     )
 
 
-@router.post("/research/stage6-final-report/track")
+@router.post("/research/stage6-final-report/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage6_final_report_track(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -2347,18 +2376,25 @@ def research_stage6_final_report_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage7/stack-scorecard")
+@router.get("/research/stage7/stack-scorecard", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage7_stack_scorecard(
     include_harness: bool = Query(default=True),
     max_latency_ms: int = Query(default=1200, ge=1, le=100000),
 ) -> dict:
-    harness = build_stage7_harness_report(max_latency_ms=max_latency_ms) if include_harness else None
-    return build_stage7_stack_scorecard_report(
-        harness_by_stack=(harness or {}).get("by_stack"),
+    settings = get_settings()
+    cache_key = f"stage7:stack_scorecard:{int(bool(include_harness))}:{max_latency_ms}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage7_stack_scorecard_report(
+            harness_by_stack=(
+                (build_stage7_harness_report(max_latency_ms=max_latency_ms) if include_harness else {}) or {}
+            ).get("by_stack"),
+        ),
     )
 
 
-@router.post("/research/stage7/stack-scorecard/track")
+@router.post("/research/stage7/stack-scorecard/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage7_stack_scorecard_track(
     run_name: str = Query(default="stage7_stack_scorecard"),
     include_harness: bool = Query(default=True),
@@ -2381,14 +2417,20 @@ def research_stage7_stack_scorecard_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage7/harness")
+@router.get("/research/stage7/harness", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage7_harness(
     max_latency_ms: int = Query(default=1200, ge=1, le=100000),
 ) -> dict:
-    return build_stage7_harness_report(max_latency_ms=max_latency_ms)
+    settings = get_settings()
+    cache_key = f"stage7:harness:{max_latency_ms}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage7_harness_report(max_latency_ms=max_latency_ms),
+    )
 
 
-@router.post("/research/stage7/harness/track")
+@router.post("/research/stage7/harness/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage7_harness_track(
     max_latency_ms: int = Query(default=1200, ge=1, le=100000),
     run_name: str = Query(default="stage7_harness"),
@@ -2403,18 +2445,23 @@ def research_stage7_harness_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage7/shadow")
+@router.get("/research/stage7/shadow", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage7_shadow(
     lookback_days: int = Query(default=14, ge=1, le=90),
     limit: int = Query(default=300, ge=1, le=2000),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage7_shadow_report(
-        db,
-        settings=settings,
-        lookback_days=lookback_days,
-        limit=limit,
+    cache_key = f"stage7:shadow:{lookback_days}:{limit}:{settings.stage7_agent_provider}:{settings.stage7_agent_provider_profile}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage7_shadow_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        ),
     )
 
 
@@ -2427,22 +2474,27 @@ def stage7_calibration(
     return build_stage7_calibration_report(db, days=days, horizon=horizon)
 
 
-@router.get("/research/stage8/shadow-ledger")
+@router.get("/research/stage8/shadow-ledger", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage8_shadow_ledger(
     lookback_days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=300, ge=50, le=5000),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage8_shadow_ledger_report(
-        db,
-        settings=settings,
-        lookback_days=lookback_days,
-        limit=limit,
+    cache_key = f"stage8:shadow:{lookback_days}:{limit}:{settings.stage8_policy_profile}:{settings.stage8_policy_version}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage8_shadow_ledger_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        ),
     )
 
 
-@router.get("/research/stage8/category-policies")
+@router.get("/research/stage8/category-policies", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage8_category_policies() -> dict:
     settings = get_settings()
     profile_name, profile = get_category_policy_profile(settings.stage8_policy_profile)
@@ -2453,7 +2505,7 @@ def research_stage8_category_policies() -> dict:
     }
 
 
-@router.get("/research/stage8/rules-field")
+@router.get("/research/stage8/rules-field", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage8_rules_field(
     market_id: int = Query(..., ge=1),
     db: Session = Depends(get_db),
@@ -2486,7 +2538,7 @@ def research_stage8_rules_field(
     }
 
 
-@router.post("/research/stage7/shadow/track")
+@router.post("/research/stage7/shadow/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage7_shadow_track(
     lookback_days: int = Query(default=14, ge=1, le=90),
     limit: int = Query(default=300, ge=1, le=2000),
@@ -2509,7 +2561,7 @@ def research_stage7_shadow_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.post("/research/stage8/shadow-ledger/track")
+@router.post("/research/stage8/shadow-ledger/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage8_shadow_ledger_track(
     lookback_days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=300, ge=50, le=5000),
@@ -2532,24 +2584,33 @@ def research_stage8_shadow_ledger_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage8/final-report")
+@router.get("/research/stage8/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage8_final_report(
     lookback_days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=300, ge=50, le=5000),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    shadow = build_stage8_shadow_ledger_report(db, settings=settings, lookback_days=lookback_days, limit=limit)
-    return build_stage8_final_report(
-        db,
-        settings=settings,
-        lookback_days=lookback_days,
-        limit=limit,
-        shadow_report=shadow,
+    cache_key = f"stage8:final:{lookback_days}:{limit}:{settings.stage8_policy_profile}:{settings.stage8_policy_version}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage8_final_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+            shadow_report=build_stage8_shadow_ledger_report(
+                db,
+                settings=settings,
+                lookback_days=lookback_days,
+                limit=limit,
+            ),
+        ),
     )
 
 
-@router.post("/research/stage8/final-report/track")
+@router.post("/research/stage8/final-report/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage8_final_report_track(
     lookback_days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=300, ge=50, le=5000),
@@ -2574,22 +2635,27 @@ def research_stage8_final_report_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage8/batch")
+@router.get("/research/stage8/batch", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage8_batch(
     lookback_days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=300, ge=50, le=5000),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage8_batch_report(
-        db,
-        settings=settings,
-        lookback_days=lookback_days,
-        limit=limit,
+    cache_key = f"stage8:batch:{lookback_days}:{limit}:{settings.stage8_policy_profile}:{settings.stage8_policy_version}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage8_batch_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+        ),
     )
 
 
-@router.get("/research/stage9/consensus-quality")
+@router.get("/research/stage9/consensus-quality", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage9_consensus_quality(
     days: int = Query(default=14, ge=1, le=180),
     db: Session = Depends(get_db),
@@ -2597,7 +2663,7 @@ def research_stage9_consensus_quality(
     return build_stage9_consensus_quality_report(db, days=days)
 
 
-@router.get("/research/stage9/directional-labeling")
+@router.get("/research/stage9/directional-labeling", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage9_directional_labeling(
     days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
@@ -2605,7 +2671,7 @@ def research_stage9_directional_labeling(
     return build_stage9_directional_labeling_report(db, days=days)
 
 
-@router.get("/research/stage9/execution-realism")
+@router.get("/research/stage9/execution-realism", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage9_execution_realism(
     days: int = Query(default=14, ge=1, le=180),
     db: Session = Depends(get_db),
@@ -2613,7 +2679,7 @@ def research_stage9_execution_realism(
     return build_stage9_execution_realism_report(db, days=days)
 
 
-@router.get("/research/stage9/batch")
+@router.get("/research/stage9/batch", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage9_batch(
     days_consensus: int = Query(default=14, ge=1, le=180),
     days_labeling: int = Query(default=30, ge=1, le=365),
@@ -2630,7 +2696,7 @@ def research_stage9_batch(
     )
 
 
-@router.get("/research/stage9/final-report")
+@router.get("/research/stage9/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage9_final_report(
     days_consensus: int = Query(default=14, ge=1, le=180),
     days_labeling: int = Query(default=30, ge=1, le=365),
@@ -2647,7 +2713,7 @@ def research_stage9_final_report(
     )
 
 
-@router.post("/research/stage9/track")
+@router.post("/research/stage9/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage9_track(
     run_name: str = Query(default="stage9_source_quality"),
     days_consensus: int = Query(default=14, ge=1, le=180),
@@ -2692,7 +2758,7 @@ def research_stage9_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage10/replay")
+@router.get("/research/stage10/replay", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_replay(
     days: int = Query(default=365, ge=1, le=1825),
     limit: int = Query(default=5000, ge=100, le=50000),
@@ -2700,31 +2766,42 @@ def research_stage10_replay(
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage10_replay_report(
-        db,
-        settings=settings,
-        days=days,
-        limit=limit,
-        event_target=event_target,
-        persist_rows=True,
+    cache_key = f"stage10:replay:{days}:{limit}:{event_target}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage10_replay_report(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+            event_target=event_target,
+            persist_rows=True,
+        ),
     )
 
 
-@router.get("/research/stage10/module-audit")
+@router.get("/research/stage10/module-audit", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_module_audit(db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     return build_stage10_module_audit_report(db, settings=settings)
 
 
-@router.get("/research/stage10/timeline-quality")
+@router.get("/research/stage10/timeline-quality", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_timeline_quality(
     days: int = Query(default=365, ge=1, le=1825),
     db: Session = Depends(get_db),
 ) -> dict:
-    return build_stage10_timeline_quality_report(db, days=days)
+    settings = get_settings()
+    cache_key = f"stage10:timeline_quality:{days}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage10_timeline_quality_report(db, days=days),
+    )
 
 
-@router.get("/research/stage10/timeline-backfill-plan")
+@router.get("/research/stage10/timeline-backfill-plan", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_timeline_backfill_plan(
     days: int = Query(default=730, ge=1, le=3650),
     limit: int = Query(default=500, ge=50, le=50000),
@@ -2733,7 +2810,7 @@ def research_stage10_timeline_backfill_plan(
     return build_stage10_timeline_backfill_plan(db, days=days, limit=limit)
 
 
-@router.post("/research/stage10/timeline-backfill-run")
+@router.post("/research/stage10/timeline-backfill-run", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage10_timeline_backfill_run(
     days: int = Query(default=730, ge=1, le=3650),
     limit: int = Query(default=500, ge=50, le=50000),
@@ -2770,7 +2847,7 @@ def research_stage10_timeline_backfill_run(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage10/final-report")
+@router.get("/research/stage10/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_final_report(
     days: int = Query(default=365, ge=1, le=1825),
     limit: int = Query(default=5000, ge=100, le=50000),
@@ -2778,16 +2855,21 @@ def research_stage10_final_report(
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage10_final_report(
-        db,
-        settings=settings,
-        days=days,
-        limit=limit,
-        event_target=event_target,
+    cache_key = f"stage10:final:{days}:{limit}:{event_target}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage10_final_report(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+            event_target=event_target,
+        ),
     )
 
 
-@router.get("/research/stage10/batch")
+@router.get("/research/stage10/batch", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage10_batch(
     days: int = Query(default=365, ge=1, le=1825),
     limit: int = Query(default=5000, ge=100, le=50000),
@@ -2795,16 +2877,21 @@ def research_stage10_batch(
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage10_batch_report(
-        db,
-        settings=settings,
-        days=days,
-        limit=limit,
-        event_target=event_target,
+    cache_key = f"stage10:batch:{days}:{limit}:{event_target}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage10_batch_report(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+            event_target=event_target,
+        ),
     )
 
 
-@router.post("/research/stage10/track")
+@router.post("/research/stage10/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage10_track(
     run_name: str = Query(default="stage10_replay_and_security"),
     days: int = Query(default=365, ge=1, le=1825),
@@ -2841,37 +2928,57 @@ def research_stage10_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage11/execution")
+@router.get("/research/stage11/execution", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage11_execution(
     days: int = Query(default=14, ge=1, le=365),
     limit: int = Query(default=200, ge=10, le=2000),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage11_execution_report(
-        db,
-        settings=settings,
-        days=days,
-        limit=limit,
+    cache_key = f"stage11:execution:{days}:{limit}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage11_execution_report(
+            db,
+            settings=settings,
+            days=days,
+            limit=limit,
+        ),
     )
 
 
-@router.get("/research/stage11/risk")
+@router.get("/research/stage11/risk", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage11_risk(
     days: int = Query(default=14, ge=1, le=365),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage11_risk_report(db, settings=settings, days=days)
+    cache_key = f"stage11:risk:{days}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage11_risk_report(db, settings=settings, days=days),
+    )
 
 
-@router.get("/research/stage11/client-report", response_model=None)
+@router.get(
+    "/research/stage11/client-report",
+    response_model=None,
+    dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)],
+)
 def research_stage11_client_report(
     days: int = Query(default=7, ge=1, le=365),
     as_csv: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict:
-    report = build_stage11_client_report(db, days=days)
+    settings = get_settings()
+    cache_key = f"stage11:client_report:{days}"
+    report = _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage11_client_report(db, days=days),
+    )
     if not as_csv:
         return report
     out = StringIO()
@@ -2895,7 +3002,7 @@ def research_stage11_client_report(
     )
 
 
-@router.post("/research/stage11/track")
+@router.post("/research/stage11/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_track(
     run_name: str = Query(default="stage11_track"),
     days_execution: int = Query(default=14, ge=1, le=365),
@@ -2929,29 +3036,39 @@ def research_stage11_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/stage11/tenant-isolation")
+@router.get("/research/stage11/tenant-isolation", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage11_tenant_isolation(
     db: Session = Depends(get_db),
 ) -> dict:
-    return build_stage11_tenant_isolation_report(db)
+    settings = get_settings()
+    return _cached_heavy_get(
+        key="stage11:tenant_isolation",
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage11_tenant_isolation_report(db),
+    )
 
 
-@router.get("/research/stage11/final-readiness")
+@router.get("/research/stage11/final-readiness", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage11_final_readiness(
     days_execution: int = Query(default=14, ge=1, le=365),
     days_client: int = Query(default=7, ge=1, le=365),
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage11_final_readiness_report(
-        db,
-        settings=settings,
-        days_execution=days_execution,
-        days_client=days_client,
+    cache_key = f"stage11:final_readiness:{days_execution}:{days_client}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage11_final_readiness_report(
+            db,
+            settings=settings,
+            days_execution=days_execution,
+            days_client=days_client,
+        ),
     )
 
 
-@router.post("/research/stage11/final-readiness/track")
+@router.post("/research/stage11/final-readiness/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_final_readiness_track(
     run_name: str = Query(default="stage11_final_readiness_track"),
     days_execution: int = Query(default=14, ge=1, le=365),
@@ -2989,7 +3106,7 @@ def research_stage11_final_readiness_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.post("/research/stage11/reconcile")
+@router.post("/research/stage11/reconcile", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_reconcile(
     max_unknown_recovery_sec: int | None = Query(default=None, ge=30, le=3600),
     db: Session = Depends(get_db),
@@ -2997,7 +3114,7 @@ def research_stage11_reconcile(
     return stage11_reconcile_job(db, max_unknown_recovery_sec=max_unknown_recovery_sec)
 
 
-@router.get("/research/stage11/orders/{order_id}")
+@router.get("/research/stage11/orders/{order_id}", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage11_order_detail(
     order_id: int,
     db: Session = Depends(get_db),
@@ -3008,7 +3125,7 @@ def research_stage11_order_detail(
     return detail
 
 
-@router.post("/research/stage11/orders/{order_id}/refresh-status")
+@router.post("/research/stage11/orders/{order_id}/refresh-status", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_order_refresh_status(
     order_id: int,
     db: Session = Depends(get_db),
@@ -3020,7 +3137,7 @@ def research_stage11_order_refresh_status(
     return out
 
 
-@router.post("/research/stage11/orders/{order_id}/cancel")
+@router.post("/research/stage11/orders/{order_id}/cancel", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_order_cancel(
     order_id: int,
     reason: str = Query(default="manual_cancel"),
@@ -3033,7 +3150,7 @@ def research_stage11_order_cancel(
     return out
 
 
-@router.post("/research/stage11/runtime-mode")
+@router.post("/research/stage11/runtime-mode", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage11_runtime_mode(
     client_code: str = Query(default="default"),
     target_mode: str = Query(..., description="SHADOW|LIMITED_EXECUTION|FULL_EXECUTION"),
@@ -3116,7 +3233,7 @@ def research_stage11_runtime_mode(
     }
 
 
-@router.get("/research/stage7/final-report")
+@router.get("/research/stage7/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_stage7_final_report(
     lookback_days: int = Query(default=14, ge=1, le=90),
     limit: int = Query(default=300, ge=1, le=2000),
@@ -3126,18 +3243,26 @@ def research_stage7_final_report(
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    return build_stage7_final_report(
-        db,
-        settings=settings,
-        lookback_days=lookback_days,
-        limit=limit,
-        stage6_days=stage6_days,
-        stage6_horizon=stage6_horizon,
-        stage6_min_labeled_returns=stage6_min_labeled_returns,
+    cache_key = (
+        f"stage7:final:{lookback_days}:{limit}:{stage6_days}:{stage6_horizon}:{stage6_min_labeled_returns}:"
+        f"{settings.stage7_agent_provider}:{settings.stage7_agent_provider_profile}"
+    )
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage7_final_report(
+            db,
+            settings=settings,
+            lookback_days=lookback_days,
+            limit=limit,
+            stage6_days=stage6_days,
+            stage6_horizon=stage6_horizon,
+            stage6_min_labeled_returns=stage6_min_labeled_returns,
+        ),
     )
 
 
-@router.post("/research/stage7/final-report/track")
+@router.post("/research/stage7/final-report/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
 def research_stage7_final_report_track(
     lookback_days: int = Query(default=14, ge=1, le=90),
     limit: int = Query(default=300, ge=1, le=2000),
@@ -3176,7 +3301,7 @@ def research_stage7_final_report_track(
     return {"report": report, "tracking": tracking}
 
 
-@router.get("/research/monte-carlo")
+@router.get("/research/monte-carlo", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_monte_carlo(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),
@@ -3208,7 +3333,7 @@ def research_monte_carlo(
     return result
 
 
-@router.get("/research/result-tables")
+@router.get("/research/result-tables", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
 def research_result_tables(
     days: int = Query(default=30, ge=1, le=365),
     horizon: str = Query(default="6h"),

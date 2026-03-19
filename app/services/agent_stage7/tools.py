@@ -76,9 +76,19 @@ def _title_similarity(a: str, b: str) -> float:
 
 
 def get_signal_context(db: Session, signal_id: int) -> dict[str, Any]:
+    return get_signal_context_cached(db, signal_id)
+
+
+def get_signal_context_cached(
+    db: Session,
+    signal_id: int,
+    *,
+    signal: Signal | None = None,
+    runtime_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with stage7_span("stage7.tool.get_signal_context"):
-        signal = db.get(Signal, int(signal_id))
-        if signal is None:
+        s = signal or db.get(Signal, int(signal_id))
+        if s is None:
             return {
                 "signal_id": int(signal_id),
                 "signal_type": None,
@@ -88,24 +98,30 @@ def get_signal_context(db: Session, signal_id: int) -> dict[str, Any]:
                 "risk_flags": ["signal_not_found"],
                 "market_id": None,
             }
-        hist = db.scalar(
-            select(SignalHistory)
-            .where(SignalHistory.signal_id == signal.id)
-            .order_by(SignalHistory.timestamp.desc())
-            .limit(1)
-        )
+        cache = runtime_cache if runtime_cache is not None else {}
+        latest_hist_map = cache.get("latest_history_by_signal_id")
+        hist = None
+        if isinstance(latest_hist_map, dict):
+            hist = latest_hist_map.get(int(s.id))
+        if hist is None:
+            hist = db.scalar(
+                select(SignalHistory)
+                .where(SignalHistory.signal_id == s.id)
+                .order_by(SignalHistory.timestamp.desc())
+                .limit(1)
+            )
         liquidity = float((hist.liquidity if hist else 0.0) or 0.0)
         # Use signal.confidence_score when available; fall back to liquidity as proxy.
-        confidence = min(0.95, max(0.05, float(getattr(signal, "confidence_score", None) or liquidity or 0.5)))
+        confidence = min(0.95, max(0.05, float(getattr(s, "confidence_score", None) or liquidity or 0.5)))
         ev_v2 = float((hist.divergence if hist else 0.0) or 0.0) * 0.20
         return {
-            "signal_id": int(signal.id),
-            "signal_type": str(signal.signal_type.value if hasattr(signal.signal_type, "value") else signal.signal_type),
+            "signal_id": int(s.id),
+            "signal_type": str(s.signal_type.value if hasattr(s.signal_type, "value") else s.signal_type),
             "confidence": round(confidence, 6),
             "liquidity": round(liquidity, 6),
             "ev_v2": round(ev_v2, 6),
             "risk_flags": [],
-            "market_id": int(signal.market_id),
+            "market_id": int(s.market_id),
         }
 
 
@@ -143,10 +159,16 @@ def get_signal_history_metrics(db: Session, signal_type: str, horizon: str) -> d
         }
 
 
-def get_market_snapshot(db: Session, market_id: int) -> dict[str, Any]:
+def get_market_snapshot(
+    db: Session,
+    market_id: int,
+    *,
+    market: Market | None = None,
+    runtime_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with stage7_span("stage7.tool.get_market_snapshot"):
-        market = db.get(Market, int(market_id))
-        if market is None:
+        m = market or db.get(Market, int(market_id))
+        if m is None:
             return {
                 "market_id": int(market_id),
                 "platform": None,
@@ -155,18 +177,32 @@ def get_market_snapshot(db: Session, market_id: int) -> dict[str, Any]:
                 "resolution_time": None,
                 "title": None,
             }
-        platform = db.scalar(select(Platform.name).where(Platform.id == market.platform_id))
+        cache = runtime_cache if runtime_cache is not None else {}
+        platform_cache = cache.get("platform_name_cache")
+        if not isinstance(platform_cache, dict):
+            platform_cache = {}
+            cache["platform_name_cache"] = platform_cache
+        pid = int(m.platform_id)
+        platform = platform_cache.get(pid)
+        if platform is None:
+            platform = db.scalar(select(Platform.name).where(Platform.id == m.platform_id))
+            platform_cache[pid] = str(platform or "")
         return {
-            "market_id": int(market.id),
+            "market_id": int(m.id),
             "platform": str(platform or ""),
-            "probability": (float(market.probability_yes) if market.probability_yes is not None else None),
-            "volume_24h": (float(market.volume_24h) if market.volume_24h is not None else None),
-            "resolution_time": market.resolution_time.isoformat() if market.resolution_time else None,
-            "title": str(market.title or ""),
+            "probability": (float(m.probability_yes) if m.probability_yes is not None else None),
+            "volume_24h": (float(m.volume_24h) if m.volume_24h is not None else None),
+            "resolution_time": m.resolution_time.isoformat() if m.resolution_time else None,
+            "title": str(m.title or ""),
         }
 
 
-def get_cross_platform_consensus(db: Session, event_id: str) -> dict[str, Any]:
+def get_cross_platform_consensus(
+    db: Session,
+    event_id: str,
+    *,
+    runtime_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with stage7_span("stage7.tool.get_cross_platform_consensus"):
         # event_id is normalized event key for Stage 7; currently we use market title as key.
         title = str(event_id or "").strip()
@@ -180,13 +216,17 @@ def get_cross_platform_consensus(db: Session, event_id: str) -> dict[str, Any]:
                 "consensus_reason_codes": ["event_id_missing"],
             }
 
-        stmt = (
-            select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
-            .join(Platform, Platform.id == Market.platform_id)
-            .order_by(Market.fetched_at.desc())
-            .limit(400)
-        )
-        rows = list(db.execute(stmt))
+        cache = runtime_cache if runtime_cache is not None else {}
+        rows = cache.get("cross_platform_rows_v1")
+        if not isinstance(rows, list):
+            stmt = (
+                select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
+                .join(Platform, Platform.id == Market.platform_id)
+                .order_by(Market.fetched_at.desc())
+                .limit(400)
+            )
+            rows = list(db.execute(stmt))
+            cache["cross_platform_rows_v1"] = rows
         best: dict[str, tuple[float, float, float]] = {}
         for platform_name, candidate_title, candidate_prob, candidate_volume, candidate_oi in rows:
             if not isinstance(candidate_prob, (int, float)):

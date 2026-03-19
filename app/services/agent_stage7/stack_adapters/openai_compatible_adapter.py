@@ -148,6 +148,16 @@ class OpenAICompatibleAdapter:
             # Quality
             "walk_forward_verdict": str(payload.walk_forward_verdict or "UNKNOWN"),
             "is_shadow_mode": bool(payload.is_shadow_mode),
+            # Portfolio context
+            "portfolio_open_positions": int(payload.portfolio_open_positions),
+            "portfolio_exposure_pct": round(float(payload.portfolio_exposure_pct), 4),
+            "portfolio_cash_usd": round(float(payload.portfolio_cash_usd), 2),
+            "portfolio_category_breakdown": dict(payload.portfolio_category_breakdown or {}),
+            "portfolio_bucket_breakdown_pct": dict(payload.portfolio_bucket_breakdown_pct or {}),
+            # Historical RAG
+            "rag_similar_count": int(payload.rag_similar_count),
+            "rag_similar_yes_rate": round(float(payload.rag_similar_yes_rate), 4),
+            "rag_summary": str(payload.rag_summary or ""),
         }
         body = {
             "model": self.model,

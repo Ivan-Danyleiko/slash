@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.observability.tracing import stage7_span, stage7_trace_id_fallback
-from app.models.models import Signal, SignalHistory, Stage7AgentDecision
+from app.models.models import Market, Signal, SignalHistory, Stage7AgentDecision
 from app.services.agent.policy import build_agent_decision_report
 from app.services.agent_stage7.decision_composer import compose_stage7_decision
 from app.services.agent_stage7.external_verifier import build_external_verification
@@ -22,6 +22,8 @@ from app.services.agent_stage7.internal_gate import evaluate_internal_gate
 from app.services.agent_stage7.store import get_cached_stage7_decision, save_stage7_decision
 from app.services.agent_stage7.stack_adapters import get_stage7_adapter
 from app.services.agent_stage7.stack_adapters.base import Stage7AdapterInput
+from app.services.agent_stage7.historical_rag import get_historical_rag_context
+from app.services.dryrun.reporter import get_portfolio_snapshot
 from app.services.research.walkforward import build_walkforward_report
 
 logger = logging.getLogger(__name__)
@@ -253,6 +255,28 @@ def build_stage7_shadow_report(
     call_cost_usd = float(settings.stage7_agent_cost_per_call_usd)
     adapter = get_stage7_adapter(settings)
     tool_runtime_cache: dict[str, Any] = {}
+    rag_runtime_cache: dict[int, dict[str, Any]] = {}
+    portfolio_ctx = (
+        get_portfolio_snapshot(db) if bool(settings.stage7_portfolio_context_enabled) else {}
+    )
+    market_ids = [int(s.market_id) for s in by_id.values()]
+    market_by_id = {
+        int(m.id): m for m in db.scalars(select(Market).where(Market.id.in_(market_ids)))
+    } if market_ids else {}
+    if signal_ids:
+        latest_hist_rows = list(
+            db.scalars(
+                select(SignalHistory)
+                .where(SignalHistory.signal_id.in_(signal_ids))
+                .order_by(SignalHistory.signal_id.asc(), SignalHistory.timestamp.desc())
+            )
+        )
+        latest_history_by_signal_id: dict[int, SignalHistory] = {}
+        for row in latest_hist_rows:
+            sid = int(row.signal_id or 0)
+            if sid and sid not in latest_history_by_signal_id:
+                latest_history_by_signal_id[sid] = row
+        tool_runtime_cache["latest_history_by_signal_id"] = latest_history_by_signal_id
     for base_row in baseline_rows:
         trace_id = stage7_trace_id_fallback()
         sid = int(base_row.get("signal_id") or 0)
@@ -261,6 +285,7 @@ def build_stage7_shadow_report(
             continue
         t0 = perf_counter()
         with stage7_span("stage7.shadow.signal"):
+            _market_obj = market_by_id.get(int(signal.market_id))
             span_gate_start = perf_counter()
             with stage7_span("stage7.shadow.internal_gate"):
                 gate = evaluate_internal_gate(base_row, settings=settings)
@@ -274,6 +299,7 @@ def build_stage7_shadow_report(
                     base_row=base_row,
                     settings=settings,
                     runtime_cache=tool_runtime_cache,
+                    market=_market_obj,
                 )
             span_external_ms = (perf_counter() - span_external_start) * 1000.0
 
@@ -351,6 +377,17 @@ def build_stage7_shadow_report(
                 ]
                 _cons_spread = round(max(_known_probs) - min(_known_probs), 4) if len(_known_probs) >= 2 else 0.0
                 _wf = _ims.get("research_decision") or {}
+                _rag_ctx = {"enabled": False, "similar_count": 0, "similar_yes_rate": 0.0, "summary": ""}
+                if bool(settings.stage7_historical_rag_enabled) and _market_obj is not None:
+                    mid = int(_market_obj.id)
+                    if mid not in rag_runtime_cache:
+                        rag_runtime_cache[mid] = get_historical_rag_context(
+                            db,
+                            market=_market_obj,
+                            min_similar=int(settings.stage7_historical_rag_min_similar),
+                            limit=int(settings.stage7_historical_rag_limit),
+                        )
+                    _rag_ctx = dict(rag_runtime_cache.get(mid) or _rag_ctx)
                 _resolution_time = _snap.get("resolution_time")
                 _days_to_res = -1
                 if _resolution_time:
@@ -383,6 +420,14 @@ def build_stage7_shadow_report(
                     consensus_spread=_cons_spread,
                     consensus_platforms=len(_known_probs),
                     walk_forward_verdict=str(_wf.get("walk_forward_verdict") or "UNKNOWN"),
+                    portfolio_open_positions=int(portfolio_ctx.get("open_positions") or 0),
+                    portfolio_exposure_pct=float(portfolio_ctx.get("open_positions_pct") or 0.0),
+                    portfolio_cash_usd=float(portfolio_ctx.get("cash_usd") or 0.0),
+                    portfolio_category_breakdown=dict(portfolio_ctx.get("category_breakdown") or {}),
+                    portfolio_bucket_breakdown_pct=dict(portfolio_ctx.get("bucket_breakdown_pct") or {}),
+                    rag_similar_count=int(_rag_ctx.get("similar_count") or 0),
+                    rag_similar_yes_rate=float(_rag_ctx.get("similar_yes_rate") or 0.0),
+                    rag_summary=str(_rag_ctx.get("summary") or ""),
                 )
                 # Rate limiting: free-tier APIs allow ~20 req/min (Gemini) / 30 req/min (Groq).
                 # Sleep 3s between LLM calls to stay under the tighter limit.

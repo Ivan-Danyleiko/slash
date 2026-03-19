@@ -5,6 +5,7 @@ from sqlalchemy import delete, exists, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.secrets import redact_text
 from app.models.enums import SignalType
 from app.models.models import (
     JobRun,
@@ -100,6 +101,10 @@ def _finish_job(db: Session, job: JobRun, status: str, details: dict) -> None:
     db.commit()
 
 
+def _safe_error(exc: Exception, *, max_len: int = 240) -> str:
+    return redact_text(str(exc), max_len=max_len)
+
+
 def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
     _cleanup_stale_running_jobs(db, job_name="sync_all_platforms", stale_minutes=20)
     if _is_recent_running_job(db, job_name="sync_all_platforms", stale_minutes=20):
@@ -110,8 +115,8 @@ def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def analyze_markets_job(db: Session) -> dict:
@@ -124,8 +129,8 @@ def analyze_markets_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def detect_duplicates_job(db: Session) -> dict:
@@ -138,8 +143,8 @@ def detect_duplicates_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def analyze_rules_job(db: Session) -> dict:
@@ -152,8 +157,8 @@ def analyze_rules_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def detect_divergence_job(db: Session) -> dict:
@@ -166,8 +171,8 @@ def detect_divergence_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def generate_signals_job(db: Session) -> dict:
@@ -180,8 +185,8 @@ def generate_signals_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def send_test_signal_job(db: Session) -> dict:
@@ -208,8 +213,8 @@ def daily_digest_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", {"digests_sent": sent})
         return {"status": "ok", "result": {"digests_sent": sent}}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def signal_push_job(db: Session) -> dict:
@@ -304,8 +309,8 @@ def signal_push_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
@@ -336,8 +341,8 @@ def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
         _finish_job(db, job, "SUCCESS", {"deleted": deleted})
         return {"status": "ok", "result": {"deleted": deleted}}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def update_watchlists_job(db: Session) -> dict:
@@ -347,8 +352,8 @@ def update_watchlists_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", {"watchlists_checked": True})
         return {"status": "ok", "result": {"watchlists_checked": True}}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def provider_contract_checks_job(db: Session) -> dict:
@@ -387,7 +392,7 @@ def provider_contract_checks_job(db: Session) -> dict:
                 "status_code": None,
                 "latency_ms": latency_ms,
                 "url": url,
-                "detail": str(exc)[:200],
+                "detail": _safe_error(exc)[:200],
             }
 
     checks: list[dict] = []
@@ -480,8 +485,8 @@ def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200
             "decision_counts": decision_counts,
         }}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage8_shadow_ledger_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
@@ -503,8 +508,8 @@ def stage8_shadow_ledger_job(db: Session, *, lookback_days: int = 14, limit: int
         _finish_job(db, job, "SUCCESS", {"tracking": tracking, "rows": report.get("rows_total")})
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage8_final_report_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
@@ -533,8 +538,8 @@ def stage8_final_report_job(db: Session, *, lookback_days: int = 14, limit: int 
         _finish_job(db, job, "SUCCESS", {"tracking": tracking, "final_decision": report.get("final_decision")})
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage9_track_job(
@@ -572,8 +577,8 @@ def stage9_track_job(
         )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage10_track_job(
@@ -615,8 +620,8 @@ def stage10_track_job(
         )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage10_timeline_backfill_job(
@@ -648,8 +653,8 @@ def stage10_timeline_backfill_job(
         )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage11_track_job(
@@ -679,8 +684,8 @@ def stage11_track_job(
         )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def stage11_reconcile_job(
@@ -714,8 +719,8 @@ def stage11_reconcile_job(
         )
         return {"status": "ok", "result": report}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def quality_snapshot_job(db: Session) -> dict:
@@ -838,8 +843,8 @@ def quality_snapshot_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def _as_utc(ts: datetime | None) -> datetime | None:
@@ -936,8 +941,8 @@ def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -
         _finish_job(db, job, "FAILED", result)
         return {"status": "error", "error": result.get("error", "labeling_failed"), "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, batch_size: int = 2000) -> dict:
@@ -1019,8 +1024,8 @@ def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, b
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def label_signal_history_15m_job(db: Session) -> dict:
@@ -1072,8 +1077,8 @@ def label_signal_history_job(
         _finish_job(db, job, "SUCCESS", payload)
         return {"status": "ok", "result": payload}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def label_signal_history_resolution_job(db: Session) -> dict:
@@ -1153,8 +1158,8 @@ def label_signal_history_resolution_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
 
 
 def cleanup_signal_history_job(db: Session) -> dict:
@@ -1173,5 +1178,5 @@ def cleanup_signal_history_job(db: Session) -> dict:
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": str(exc)})
-        return {"status": "error", "error": str(exc)}
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}

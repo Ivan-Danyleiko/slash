@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 import structlog
 
 from app.models.models import JobRun
+from app.core.secrets import redact_text
 from app.repositories.market_repository import MarketRepository
 from app.core.config import get_settings
 from app.services.collectors.kalshi import KalshiCollector
@@ -44,8 +45,9 @@ class CollectorSyncService:
         except Exception as exc:  # noqa: BLE001
             self.db.rollback()
             summary["errors"] = 1
-            summary["error"] = str(exc)
-            logger.warning("collector_fetch_failed", platform=collector.platform_name, error=str(exc))
+            err = redact_text(str(exc))
+            summary["error"] = err
+            logger.warning("collector_fetch_failed", platform=collector.platform_name, error=err)
             return summary
 
     def sync_all(self, platform: str | None = None) -> dict:
@@ -72,8 +74,9 @@ class CollectorSyncService:
             logger.info("collector_sync_finished", result=result)
             return result
         except Exception as exc:  # noqa: BLE001
+            err = redact_text(str(exc))
             job.status = "FAILED"
-            job.details = {"error": str(exc)}
+            job.details = {"error": err}
             self.db.commit()
-            logger.error("collector_sync_failed", error=str(exc))
+            logger.error("collector_sync_failed", error=err)
             raise

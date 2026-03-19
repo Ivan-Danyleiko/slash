@@ -5,6 +5,8 @@ from typing import TypeVar
 import httpx
 import structlog
 
+from app.core.secrets import redact_text
+
 logger = structlog.get_logger(__name__)
 T = TypeVar("T")
 
@@ -28,7 +30,7 @@ def retry_request(
                 platform=platform,
                 attempt=attempt,
                 retries=retries,
-                error=str(exc),
+                error=redact_text(str(exc), max_len=200),
             )
             if attempt < retries:
                 time.sleep(backoff_seconds * attempt)

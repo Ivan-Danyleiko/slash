@@ -12,7 +12,7 @@ from app.services.agent_stage7.tools import (
     get_market_snapshot,
     get_readiness_gate_status,
     get_research_decision,
-    get_signal_context,
+    get_signal_context_cached,
     get_signal_history_metrics,
 )
 
@@ -39,25 +39,36 @@ def build_external_verification(
     base_row: dict[str, Any],
     settings: Settings,
     runtime_cache: dict[str, Any] | None = None,
+    market: Market | None = None,
 ) -> dict[str, Any]:
     cache = runtime_cache if runtime_cache is not None else {}
-    market = db.get(Market, signal.market_id)
-    title = str(market.title if market else signal.title or "").strip()
-    market_rules = str(market.rules_text or "") if market else ""
+    m = market or db.get(Market, signal.market_id)
+    title = str(m.title if m else signal.title or "").strip()
+    market_rules = str(m.rules_text or "") if m else ""
 
     # Stage 7 Tool Interface Spec: 6 explicit callable tools.
-    signal_context = get_signal_context(db, int(signal.id))
+    signal_context = get_signal_context_cached(
+        db,
+        int(signal.id),
+        signal=signal,
+        runtime_cache=cache,
+    )
     signal_type_value = str(base_row.get("signal_type") or signal_context.get("signal_type") or "")
     history_key = f"history:{signal_type_value}:6h"
     history_metrics = cache.get(history_key)
     if history_metrics is None:
         history_metrics = get_signal_history_metrics(db, signal_type_value, "6h")
         cache[history_key] = history_metrics
-    market_snapshot = get_market_snapshot(db, int(signal.market_id))
+    market_snapshot = get_market_snapshot(
+        db,
+        int(signal.market_id),
+        market=m,
+        runtime_cache=cache,
+    )
     consensus_key = f"consensus:{title}"
     consensus = cache.get(consensus_key)
     if consensus is None:
-        consensus = get_cross_platform_consensus(db, title)
+        consensus = get_cross_platform_consensus(db, title, runtime_cache=cache)
         cache[consensus_key] = consensus
     readiness_gate = cache.get("readiness_gate")
     if readiness_gate is None:

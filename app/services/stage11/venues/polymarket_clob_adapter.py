@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.config import Settings
+from app.core.secrets import redact_text
 from app.services.stage11.venues.base import (
     Stage11PlaceRequest,
     Stage11PlaceResult,
@@ -153,7 +154,7 @@ class PolymarketClobAdapter:
             return Stage11PlaceResult(
                 status="UNKNOWN_SUBMIT",
                 venue_order_id=None,
-                response_payload={"error": str(exc), "adapter_mode": "live"},
+                response_payload={"error": redact_text(str(exc)), "adapter_mode": "live"},
                 error="request_failed",
             )
 
@@ -187,7 +188,11 @@ class PolymarketClobAdapter:
                 return Stage11StatusResult(status="UNKNOWN_SUBMIT", response_payload=data, error=f"http_{resp.status_code}")
             return Stage11StatusResult(status="CANCELLED_SAFE", response_payload=data)
         except Exception as exc:  # noqa: BLE001
-            return Stage11StatusResult(status="UNKNOWN_SUBMIT", response_payload={"error": str(exc)}, error="cancel_failed")
+            return Stage11StatusResult(
+                status="UNKNOWN_SUBMIT",
+                response_payload={"error": redact_text(str(exc))},
+                error="cancel_failed",
+            )
 
     def fetch_order_status(self, venue_order_id: str) -> Stage11StatusResult:
         if self._is_dry_run():
@@ -266,4 +271,8 @@ class PolymarketClobAdapter:
                 )
             return Stage11StatusResult(status="UNKNOWN_SUBMIT", response_payload=data, error="unknown_status")
         except Exception as exc:  # noqa: BLE001
-            return Stage11StatusResult(status="UNKNOWN_SUBMIT", response_payload={"error": str(exc)}, error="status_failed")
+            return Stage11StatusResult(
+                status="UNKNOWN_SUBMIT",
+                response_payload={"error": redact_text(str(exc))},
+                error="status_failed",
+            )

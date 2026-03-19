@@ -29,6 +29,7 @@ from app.models.models import (
 )
 from app.services.dryrun.kelly import kelly_fraction, portfolio_kelly_adjustment
 from app.services.dryrun.scorer import composite_score
+from app.services.dryrun.cross_platform import build_cross_platform_prob_map, get_cross_platform_prob
 from app.utils.http import retry_request
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ INITIAL_BALANCE = 100.0
 CLOB_MAX_POSITION_PCT = 0.05
 NON_CLOB_MAX_POSITION_PCT = 0.02
 NON_CLOB_MAX_TOTAL_EXPOSURE_PCT = 0.15
-MAX_TOTAL_EXPOSURE_PCT = 0.40
+MAX_TOTAL_EXPOSURE_PCT = 0.80
 MIN_NOTIONAL_USD = 1.0
 STOP_LOSS_PARTIAL_RATIO = 0.65  # close 50% if mark drops 35% from entry
 STOP_LOSS_FULL_RATIO = 0.40     # close full if mark drops 60% from entry
@@ -196,9 +197,16 @@ def get_or_create_portfolio(db: Session) -> DryrunPortfolio:
     return row
 
 
+def _lock_portfolio(db: Session) -> DryrunPortfolio:
+    """Lock portfolio row for update to avoid concurrent cash/exposure races."""
+    row = get_or_create_portfolio(db)
+    locked = db.scalar(select(DryrunPortfolio).where(DryrunPortfolio.id == row.id).with_for_update())
+    return locked or row
+
+
 def reset_portfolio(db: Session) -> DryrunPortfolio:
     """Close all open positions and reset cash to $100."""
-    portfolio = get_or_create_portfolio(db)
+    portfolio = _lock_portfolio(db)
     now = datetime.now(UTC)
     now_cmp = _as_utc_naive(now) or now.replace(tzinfo=None)
     open_positions = list(
@@ -253,7 +261,35 @@ def _extract_side_prices(market: Market, direction: str) -> tuple[float | None, 
     return None, spread_pct
 
 
-def _estimate_our_prob_yes(signal: Signal, s7: Stage7AgentDecision, market: Market) -> float:
+def _estimate_our_prob_yes(
+    db: Session,
+    signal: Signal,
+    s7: Stage7AgentDecision,
+    market: Market,
+    *,
+    cross_prob_cache: dict[int, dict[str, Any] | None] | None = None,
+    precomputed_cross_probs: dict[int, dict[str, Any] | None] | None = None,
+) -> float:
+    settings = get_settings()
+    market_prob_yes = float(market.probability_yes or 0.5)
+
+    cross: dict[str, Any] | None
+    if precomputed_cross_probs is not None and int(market.id) in precomputed_cross_probs:
+        cross = precomputed_cross_probs.get(int(market.id))
+    elif cross_prob_cache is not None:
+        mid = int(market.id)
+        if mid not in cross_prob_cache:
+            cross_prob_cache[mid] = get_cross_platform_prob(db, market=market, settings=settings)
+        cross = cross_prob_cache.get(mid)
+    else:
+        cross = get_cross_platform_prob(db, market=market, settings=settings)
+    if cross:
+        cross_prob = float(cross.get("cross_prob") or market_prob_yes)
+        if abs(cross_prob - market_prob_yes) >= float(settings.dryrun_cross_platform_min_diff):
+            w = min(1.0, max(0.0, float(settings.dryrun_cross_platform_prob_weight)))
+            blended = (w * cross_prob) + ((1.0 - w) * market_prob_yes)
+            return min(0.95, max(0.05, blended))
+
     ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
     market_prob = ev_bundle.get("market_prob")
     if isinstance(market_prob, (int, float)):
@@ -285,11 +321,13 @@ def _estimate_our_prob_yes(signal: Signal, s7: Stage7AgentDecision, market: Mark
             inferred_sign = 1.0 if str(signal.signal_direction or "YES").upper() == "YES" else -1.0
             move = float(recent_move) * inferred_sign
 
-        # Empirical mean-reversion edge from inverted-momentum backtest.
+        # Empirical mean-reversion edge from inverted-momentum backtest (57% win rate, 23 samples).
+        # Scale edge with move magnitude: small moves → smaller edge; cap at MOMENTUM_CONTRARIAN_EDGE.
         sign = 1.0 if move >= 0 else -1.0
-        return min(0.95, max(0.05, current - sign * MOMENTUM_CONTRARIAN_EDGE))
+        scaled_edge = min(MOMENTUM_CONTRARIAN_EDGE, max(0.02, abs(move) * 1.5))
+        return min(0.95, max(0.05, current - sign * scaled_edge))
 
-    return min(0.95, max(0.05, float(market.probability_yes or 0.5)))
+    return min(0.95, max(0.05, market_prob_yes))
 
 
 def _time_bucket_limit(days_to_res: float) -> float:
@@ -421,11 +459,13 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
       hard_rejected — list of {signal_id, title, reason}
       soft_rejected — kept for backward-compatible UI (unused in stage15)
       duplicates    — count already-open markets
+      row_map       — latest Stage7 rows by signal_id for reuse in run phase
     """
     portfolio = get_or_create_portfolio(db)
     now = datetime.now(UTC)
 
-    rows = _load_latest_keep_rows(db, limit=100)
+    rows = _load_latest_keep_rows(db, limit=300)
+    row_map = {int(signal.id): (signal, s7, market) for signal, s7, market in rows}
 
     open_market_ids: set[int] = set(
         db.scalars(
@@ -441,6 +481,12 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
     hard_rejected: list[dict[str, Any]] = []
     soft_rejected: list[dict[str, Any]] = []
     duplicates = 0
+    cross_prob_cache: dict[int, dict[str, Any] | None] = {}
+    precomputed_cross_probs = build_cross_platform_prob_map(
+        db,
+        markets=[market for _, _, market in rows],
+        settings=get_settings(),
+    )
 
     for signal, s7, market in rows:
         if market.id in open_market_ids:
@@ -465,7 +511,14 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
         daily_ev = ev_pct / max(1.0, days_to_res)
         confidence = float(signal.confidence_score or 0.0)
 
-        our_prob_yes = _estimate_our_prob_yes(signal, s7, market)
+        our_prob_yes = _estimate_our_prob_yes(
+            db,
+            signal,
+            s7,
+            market,
+            cross_prob_cache=cross_prob_cache,
+            precomputed_cross_probs=precomputed_cross_probs,
+        )
         our_prob_side = our_prob_yes if direction == "YES" else (1.0 - our_prob_yes)
         raw_kelly = kelly_fraction(
             market_price=entry_price,
@@ -500,6 +553,7 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
             "kelly": raw_kelly,
             "score": score,
             "is_clob": is_clob,
+            "our_prob_yes": our_prob_yes,
         }
 
         # Hard reject
@@ -527,6 +581,7 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
         "hard_rejected": hard_rejected,
         "soft_rejected": soft_rejected,
         "duplicates": duplicates,
+        "row_map": row_map,
     }
 
 
@@ -558,8 +613,8 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             "cash_remaining_usd": round(portfolio.current_cash_usd, 4),
             "skip_reasons": ["no_candidates_after_scoring"],
         }
-    rows = _load_latest_keep_rows(db, limit=300)
-    by_signal_id = {int(signal.id): (signal, s7, market) for signal, s7, market in rows}
+    portfolio = _lock_portfolio(db)
+    by_signal_id = dict(scan.get("row_map") or {})
 
     # Collect already-open market IDs to avoid duplicate positions
     open_positions = list(
@@ -596,6 +651,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
     for key in list(bucket_open_notional_pct.keys()):
         bucket_open_notional_pct[key] /= max(float(portfolio.initial_balance_usd), 1.0)
 
+    cross_prob_cache: dict[int, dict[str, Any] | None] = {}
     for cand in accepted_scored:
         sid = int(cand.get("signal_id") or 0)
         triple = by_signal_id.get(sid)
@@ -622,7 +678,17 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         daily_ev = float(cand.get("daily_ev") or 0.0)
         is_clob = bool(cand.get("is_clob"))
 
-        our_prob_yes = _estimate_our_prob_yes(signal, s7, market)
+        raw_our_prob = cand.get("our_prob_yes")
+        if isinstance(raw_our_prob, (int, float)):
+            our_prob_yes = min(0.95, max(0.05, float(raw_our_prob)))
+        else:
+            our_prob_yes = _estimate_our_prob_yes(
+                db,
+                signal,
+                s7,
+                market,
+                cross_prob_cache=cross_prob_cache,
+            )
         our_prob_side = our_prob_yes if direction == "YES" else (1.0 - our_prob_yes)
         base_kelly = kelly_fraction(market_price=entry_price, our_prob=our_prob_side, alpha=0.25, max_fraction=0.10)
         adjusted_kelly = portfolio_kelly_adjustment(
@@ -711,7 +777,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
 
 def refresh_mark_prices(db: Session) -> dict[str, Any]:
     """Fetch current CLOB prices for all OPEN positions and update unrealized P&L."""
-    portfolio = get_or_create_portfolio(db)
+    portfolio = _lock_portfolio(db)
     open_positions = list(
         db.scalars(
             select(DryrunPosition)
@@ -839,7 +905,13 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
         )
         ev_remaining = pos.unrealized_pnl_usd / pos.notional_usd if pos.notional_usd > 0 else 0.0
         daily_ev_remaining = ev_remaining / days_left
-        if days_held >= TIME_EXIT_MIN_HOLD_DAYS and daily_ev_remaining < TIME_EXIT_MIN_DAILY_EV:
+        # Skip time-exit if partial stop already executed — position may still recover
+        partial_stop_active = "partial_stop_hit" in str(pos.open_reason or "")
+        if (
+            days_held >= TIME_EXIT_MIN_HOLD_DAYS
+            and daily_ev_remaining < TIME_EXIT_MIN_DAILY_EV
+            and not partial_stop_active
+        ):
             _close_pos("time_exit_low_daily_ev")
             time_exit_closed += 1
             total_unrealized -= pos.unrealized_pnl_usd
@@ -867,7 +939,7 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
 
 def check_resolutions(db: Session) -> dict[str, Any]:
     """Close positions for markets that Gamma API has marked as resolved."""
-    portfolio = get_or_create_portfolio(db)
+    portfolio = _lock_portfolio(db)
     open_positions = list(
         db.scalars(
             select(DryrunPosition).where(

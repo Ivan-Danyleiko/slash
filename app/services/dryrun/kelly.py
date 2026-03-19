@@ -27,15 +27,21 @@ def portfolio_kelly_adjustment(
     *,
     base_kelly: float,
     total_open_notional_pct: float,
-    max_total_exposure: float = 0.40,
+    max_total_exposure: float = 0.80,
 ) -> float:
-    """Scale Kelly by remaining portfolio capacity."""
+    """Scale Kelly by remaining portfolio capacity.
+
+    Linear scale-down starts at 80% of max_exposure and reaches 0 at 100%.
+    Example (max_exposure=0.80): scale starts at 0.64 notional pct.
+    """
     remaining_capacity = max(0.0, float(max_total_exposure) - float(total_open_notional_pct))
     if remaining_capacity <= 0.0:
         return 0.0
     adjusted = float(base_kelly)
-    if float(total_open_notional_pct) > float(max_total_exposure) * 0.7:
-        scale = 1.0 - (float(total_open_notional_pct) / float(max_total_exposure))
+    fill_ratio = float(total_open_notional_pct) / float(max_total_exposure)
+    if fill_ratio > 0.8:
+        # Linear scale: 1.0 at 80% fill → 0.0 at 100% fill
+        scale = (1.0 - fill_ratio) / 0.2
         adjusted *= max(0.0, scale)
     return max(0.0, min(adjusted, remaining_capacity))
 

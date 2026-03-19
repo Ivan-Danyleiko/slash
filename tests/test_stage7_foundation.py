@@ -13,7 +13,8 @@ from app.services.agent_stage7.stack_adapters.plain_api_adapter import PlainApiA
 from app.services.agent_stage7.store import get_cached_stage7_decision, save_stage7_decision
 from app.db.base import Base
 from app.models.enums import SignalType
-from app.models.models import Market, Platform, Signal
+from app.models.models import DuplicateMarketPair, Market, Platform, Signal
+from app.services.agent_stage7.historical_rag import get_historical_rag_context
 from app.services.research.stage7_final_report import _resolve_stage7_decision
 from app.services.research.stage7_harness import build_stage7_harness_report
 from app.services.research.stage7_stack_scorecard import build_stage7_stack_scorecard_report
@@ -287,3 +288,70 @@ def test_stage7_final_decision_data_pending_when_insufficient_data() -> None:
         data_sufficient_for_acceptance=False,
     )
     assert verdict == "NO_GO_DATA_PENDING"
+
+
+def test_stage7_historical_rag_returns_base_rate_from_similar_resolved() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, class_=Session)
+    with session_factory() as db:
+        p = Platform(name="POLYMARKET", base_url="https://poly")
+        db.add(p)
+        db.flush()
+
+        base = Market(
+            platform_id=p.id,
+            external_market_id="base",
+            title="Will Team A win finals 2026?",
+            category="sports",
+            status="open",
+            probability_yes=0.55,
+            created_at=datetime.now(UTC),
+            fetched_at=datetime.now(UTC),
+        )
+        sim_yes = Market(
+            platform_id=p.id,
+            external_market_id="sim-yes",
+            title="Will Team A win finals 2025?",
+            category="sports",
+            status="resolved",
+            probability_yes=0.62,
+            source_payload={"resolvedOutcome": "YES"},
+            created_at=datetime.now(UTC),
+            fetched_at=datetime.now(UTC),
+        )
+        sim_no = Market(
+            platform_id=p.id,
+            external_market_id="sim-no",
+            title="Will Team A win finals 2024?",
+            category="sports",
+            status="resolved",
+            probability_yes=0.38,
+            source_payload={"resolvedOutcome": "NO"},
+            created_at=datetime.now(UTC),
+            fetched_at=datetime.now(UTC),
+        )
+        db.add_all([base, sim_yes, sim_no])
+        db.flush()
+        db.add_all(
+            [
+                DuplicateMarketPair(
+                    market_a_id=base.id,
+                    market_b_id=sim_yes.id,
+                    similarity_score=88.0,
+                    similarity_explanation="title overlap",
+                ),
+                DuplicateMarketPair(
+                    market_a_id=base.id,
+                    market_b_id=sim_no.id,
+                    similarity_score=86.0,
+                    similarity_explanation="title overlap",
+                ),
+            ]
+        )
+        db.commit()
+
+        rag = get_historical_rag_context(db, market=base, min_similar=2, limit=3)
+        assert rag["enabled"] is True
+        assert rag["similar_count"] == 2
+        assert 0.49 <= float(rag["similar_yes_rate"]) <= 0.51

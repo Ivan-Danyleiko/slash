@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.deps import require_user_id
 from app.db.session import get_db
 from app.models.models import LiquidityAnalysis, Market, Platform, RulesAnalysis
 from app.schemas.market import MarketAnalysisOut, MarketOut
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/markets", tags=["markets"])
 @router.get("", response_model=list[MarketOut])
 def list_markets(
     limit: int = Query(default=50, le=200),
-    offset: int = 0,
+    offset: int = Query(default=0, ge=0),
     platform: str | None = Query(default=None),
     status: str | None = Query(default=None),
     category: str | None = Query(default=None),
@@ -55,17 +56,16 @@ def list_markets(
 @router.get("/{market_id}", response_model=MarketOut)
 def get_market(
     market_id: int,
-    x_user_id: str | None = Header(default=None),
+    x_user_id: str | None = Depends(require_user_id),
     x_username: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> MarketOut:
     m = db.get(Market, market_id)
     if not m:
         raise HTTPException(status_code=404, detail="Market not found")
-    if x_user_id:
-        svc = TelegramProductService(db)
-        user = svc.get_or_create_user(telegram_user_id=x_user_id, username=x_username)
-        svc.record_market_opened(user, market_id)
+    svc = TelegramProductService(db)
+    user = svc.get_or_create_user(telegram_user_id=x_user_id, username=x_username)
+    svc.record_market_opened(user, market_id)
     platform = db.scalar(select(Platform).where(Platform.id == m.platform_id))
     return MarketOut(
         id=m.id,

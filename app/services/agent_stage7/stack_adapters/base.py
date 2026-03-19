@@ -32,6 +32,16 @@ class Stage7AdapterInput:
     consensus_platforms: int = 0
     # Walk-forward quality
     walk_forward_verdict: str = "UNKNOWN"
+    # Portfolio-aware context
+    portfolio_open_positions: int = 0
+    portfolio_exposure_pct: float = 0.0
+    portfolio_cash_usd: float = 0.0
+    portfolio_category_breakdown: dict[str, int] | None = None
+    portfolio_bucket_breakdown_pct: dict[str, float] | None = None
+    # Historical RAG context
+    rag_similar_count: int = 0
+    rag_similar_yes_rate: float = 0.0
+    rag_summary: str = ""
 
 
 class Stage7Adapter(Protocol):
@@ -39,4 +49,3 @@ class Stage7Adapter(Protocol):
 
     def decide(self, payload: Stage7AdapterInput) -> dict[str, Any]:
         ...
-
