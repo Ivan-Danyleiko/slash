@@ -19,13 +19,10 @@ _AMBIGUITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsubjective\b", re.IGNORECASE),
     re.compile(r"\bsubject to\b", re.IGNORECASE),
     re.compile(r"\bif deemed\b", re.IGNORECASE),
-    re.compile(r"\bif applicable\b", re.IGNORECASE),
-    re.compile(r"\bin the event of\b", re.IGNORECASE),
     re.compile(r"\bif unavailable\b", re.IGNORECASE),
     re.compile(r"\bmay be resolved by\b", re.IGNORECASE),
     re.compile(r"\bresolution source\s*:?\s*(tbd|to be determined)\b", re.IGNORECASE),
     re.compile(r"\bofficial source\s*:?\s*(tbd|to be determined)\b", re.IGNORECASE),
-    re.compile(r"\bconsensus\b", re.IGNORECASE),
     re.compile(r"\bmanual review\b", re.IGNORECASE),
 )
 

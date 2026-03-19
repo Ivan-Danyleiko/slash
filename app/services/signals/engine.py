@@ -1443,16 +1443,21 @@ class SignalEngine:
                 .where(Market.probability_yes <= float(self.settings.signal_tail_max_prob))
                 .where(
                     func.coalesce(
-                        Market.volume_24h,
-                        Market.notional_value_dollars,
-                        Market.liquidity_value,
+                        func.nullif(Market.volume_24h, 0),
+                        func.nullif(Market.notional_value_dollars, 0),
+                        func.nullif(Market.liquidity_value, 0),
                         0.0,
                     )
                     >= min_volume
                 )
                 .where(Market.resolution_time.is_not(None))
                 .where(Market.resolution_time <= (datetime.now(UTC) + timedelta(days=max_days)))
-                .where(~Market.status.in_(["resolved", "closed", "settled", "final", "ended"]))
+                .where(
+                    or_(
+                        Market.status.is_(None),
+                        ~Market.status.in_(["resolved", "closed", "settled", "final", "ended"]),
+                    )
+                )
                 .order_by(Market.probability_yes.asc(), Market.fetched_at.desc())
                 .limit(max_candidates * 20)
             )
