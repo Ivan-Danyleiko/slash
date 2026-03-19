@@ -144,7 +144,7 @@ def review_tail_narrative(
         "rules_text": str(market.rules_text or "")[:2000],
         "market_prob_yes": round(float(market_prob), 6),
         "our_prob_yes": round(float(our_prob), 6),
-        "signal_direction": str(signal.signal_direction or "NO").upper(),
+        "signal_direction": str(signal.signal_direction or "YES").upper(),
         "prompt_version_hash": prompt_hash,
     }
     ih = _input_hash(payload)
@@ -156,9 +156,9 @@ def review_tail_narrative(
             return {**out, "cache_hit": True}
         _TAIL_LLM_CACHE.pop(ih, None)
 
-    fallback_direction = str(signal.signal_direction or "NO").upper()
+    fallback_direction = str(signal.signal_direction or "YES").upper()
     if fallback_direction not in {"YES", "NO"}:
-        fallback_direction = "NO"
+        fallback_direction = "YES"
     fallback = {
         "decision": "KEEP",
         "direction": fallback_direction,

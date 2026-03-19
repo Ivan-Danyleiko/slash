@@ -88,6 +88,33 @@ def _calc_v2_notional_usd(
     return max(0.5, capped)
 
 
+def _close_position(
+    db: Session,
+    *,
+    row: Stage17TailPosition,
+    mark: float,
+    pnl: float,
+    close_reason: str,
+    fill_payload: dict[str, Any] | None = None,
+) -> None:
+    row.status = "CLOSED"
+    row.closed_at = datetime.now(UTC)
+    row.realized_pnl_usd = float(pnl)
+    row.realized_multiplier = max(0.0, 1.0 + (float(pnl) / float(row.notional_usd or 1.0)))
+    row.current_multiplier = row.realized_multiplier
+    row.unrealized_pnl_usd = 0.0
+    row.close_reason = close_reason
+    db.add(
+        Stage17TailFill(
+            position_id=int(row.id),
+            fill_price=float(mark),
+            fill_size_usd=0.0,
+            fee_usd=0.0,
+            fill_payload=fill_payload or {"event": close_reason},
+        )
+    )
+
+
 def _is_external_api_degraded(db: Session) -> tuple[bool, str]:
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=2)
@@ -189,10 +216,10 @@ def run_stage17_tail_cycle(
             break
         if (open_positions_count + opened) >= int(settings.signal_tail_max_positions_open):
             break
+        # Skip if signal already has ANY position (open or closed) — prevents cyclic reopen.
         existing = db.scalar(
             select(Stage17TailPosition)
             .where(Stage17TailPosition.signal_id == signal.id)
-            .where(Stage17TailPosition.status == "OPEN")
             .limit(1)
         )
         if existing is not None:
@@ -233,9 +260,7 @@ def run_stage17_tail_cycle(
             if str(llm.get("decision") or "KEEP").upper() == "SKIP":
                 skipped += 1
                 continue
-            d = str(llm.get("direction") or direction).upper()
-            if d in {"YES", "NO"}:
-                direction = d
+            # v2: direction is always YES (bet_yes_underpriced). LLM can only SKIP, not flip direction.
             model_version = f"{llm.get('provider') or 'none'}:{llm.get('model_version') or 'none'}"
             input_hash = str(llm.get("input_hash") or "") or None
             prompt_version_hash = str(llm.get("prompt_version_hash") or "") or None
@@ -351,21 +376,12 @@ def run_stage17_tail_cycle(
                 pnl = (shares * float(mark)) - float(row.notional_usd)
             else:
                 pnl = 0.0
-            row.status = "CLOSED"
-            row.closed_at = datetime.now(UTC)
-            row.realized_pnl_usd = pnl
-            row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
-            row.current_multiplier = row.realized_multiplier
-            row.unrealized_pnl_usd = 0.0
-            row.close_reason = "legacy_direction_no_retired"
-            db.add(
-                Stage17TailFill(
-                    position_id=int(row.id),
-                    fill_price=mark,
-                    fill_size_usd=0.0,
-                    fee_usd=0.0,
-                    fill_payload={"event": row.close_reason},
-                )
+            _close_position(
+                db,
+                row=row,
+                mark=mark,
+                pnl=pnl,
+                close_reason="legacy_direction_no_retired",
             )
             closed += 1
             continue
@@ -386,42 +402,24 @@ def run_stage17_tail_cycle(
             if float(mark) >= take_profit_mark:
                 shares = float(row.notional_usd) / float(row.entry_price)
                 pnl = (shares * float(mark)) - float(row.notional_usd)
-                row.status = "CLOSED"
-                row.closed_at = datetime.now(UTC)
-                row.realized_pnl_usd = pnl
-                row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
-                row.current_multiplier = row.realized_multiplier
-                row.unrealized_pnl_usd = 0.0
-                row.close_reason = "take_profit_50"
-                db.add(
-                    Stage17TailFill(
-                        position_id=int(row.id),
-                        fill_price=mark,
-                        fill_size_usd=0.0,
-                        fee_usd=0.0,
-                        fill_payload={"event": row.close_reason},
-                    )
+                _close_position(
+                    db,
+                    row=row,
+                    mark=mark,
+                    pnl=pnl,
+                    close_reason="take_profit_50",
                 )
                 closed += 1
                 continue
             if float(mark) <= stop_loss_floor_mark:
                 shares = float(row.notional_usd) / float(row.entry_price)
                 pnl = (shares * float(mark)) - float(row.notional_usd)
-                row.status = "CLOSED"
-                row.closed_at = datetime.now(UTC)
-                row.realized_pnl_usd = pnl
-                row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
-                row.current_multiplier = row.realized_multiplier
-                row.unrealized_pnl_usd = 0.0
-                row.close_reason = "stop_loss_floor"
-                db.add(
-                    Stage17TailFill(
-                        position_id=int(row.id),
-                        fill_price=mark,
-                        fill_size_usd=0.0,
-                        fee_usd=0.0,
-                        fill_payload={"event": row.close_reason},
-                    )
+                _close_position(
+                    db,
+                    row=row,
+                    mark=mark,
+                    pnl=pnl,
+                    close_reason="stop_loss_floor",
                 )
                 closed += 1
                 continue
@@ -433,21 +431,12 @@ def run_stage17_tail_cycle(
                     if float(mark) < min_mark:
                         shares = float(row.notional_usd) / float(row.entry_price)
                         pnl = (shares * float(mark)) - float(row.notional_usd)
-                        row.status = "CLOSED"
-                        row.closed_at = datetime.now(UTC)
-                        row.realized_pnl_usd = pnl
-                        row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
-                        row.current_multiplier = row.realized_multiplier
-                        row.unrealized_pnl_usd = 0.0
-                        row.close_reason = "deadline_exit"
-                        db.add(
-                            Stage17TailFill(
-                                position_id=int(row.id),
-                                fill_price=mark,
-                                fill_size_usd=0.0,
-                                fee_usd=0.0,
-                                fill_payload={"event": row.close_reason},
-                            )
+                        _close_position(
+                            db,
+                            row=row,
+                            mark=mark,
+                            pnl=pnl,
+                            close_reason="deadline_exit",
                         )
                         closed += 1
                         continue
@@ -461,21 +450,14 @@ def run_stage17_tail_cycle(
             pnl = float(row.notional_usd) * ((1.0 - float(row.entry_price)) / float(row.entry_price))
         else:
             pnl = -float(row.notional_usd)
-        row.status = "CLOSED"
-        row.closed_at = datetime.now(UTC)
-        row.realized_pnl_usd = pnl
-        row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
-        row.current_multiplier = row.realized_multiplier
-        row.unrealized_pnl_usd = 0.0
-        row.close_reason = "resolved_win" if won else "resolved_loss"
-        db.add(
-            Stage17TailFill(
-                position_id=int(row.id),
-                fill_price=mark,
-                fill_size_usd=0.0,
-                fee_usd=0.0,
-                fill_payload={"event": row.close_reason, "outcome_yes": bool(outcome_yes)},
-            )
+        close_reason = "resolved_win" if won else "resolved_loss"
+        _close_position(
+            db,
+            row=row,
+            mark=mark,
+            pnl=pnl,
+            close_reason=close_reason,
+            fill_payload={"event": close_reason, "outcome_yes": bool(outcome_yes)},
         )
         if won:
             win_alerts.append(
