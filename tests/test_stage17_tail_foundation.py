@@ -22,9 +22,11 @@ def test_stage17_tail_classifier_blocks_ambiguity() -> None:
     market = Market(
         platform_id=1,
         external_market_id="m1",
-        title="Will there be an earthquake tomorrow?",
+        title="Will Team A win the championship final?",
         rules_text="Resolution at our discretion.",
         probability_yes=0.04,
+        volume_24h=1000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=7),
     )
     out = classify_tail_event(market, settings=SignalEngine(_mk_db()).settings)
     assert out is not None
@@ -36,9 +38,11 @@ def test_stage17_tail_classifier_blocks_tbd_resolution_source() -> None:
     market = Market(
         platform_id=1,
         external_market_id="m1b",
-        title="Will there be exactly 0 earthquakes over magnitude 4.5 tomorrow?",
+        title="Will Bitcoin reach $150000 this month?",
         rules_text="Resolution source: TBD by committee.",
         probability_yes=0.04,
+        volume_24h=1000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=14),
     )
     out = classify_tail_event(market, settings=SignalEngine(_mk_db()).settings)
     assert out is not None
@@ -88,7 +92,7 @@ def test_stage17_tail_circuit_breaker_uses_crypto_alias_limit() -> None:
             direction="YES",
             status="OPEN",
             entry_price=0.04,
-            notional_usd=3.9,
+            notional_usd=19.9,
         )
     )
     db.commit()
@@ -114,7 +118,7 @@ def test_stage17_tail_circuit_breaker_uses_zero_event_limit() -> None:
             direction="YES",
             status="OPEN",
             entry_price=0.02,
-            notional_usd=1.95,
+            notional_usd=19.95,
         )
     )
     db.commit()
@@ -185,10 +189,12 @@ def test_stage17_signal_engine_creates_tail_candidate_when_enabled() -> None:
     market = Market(
         platform_id=platform.id,
         external_market_id="tail-1",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.03,
+        title="Will Bitcoin reach $150000 by Dec 31, 2026?",
+        probability_yes=0.05,
+        status="active",
         volume_24h=50_000.0,
         liquidity_value=100_000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=30),
     )
     db.add(market)
     db.commit()
@@ -209,4 +215,4 @@ def test_stage17_signal_engine_creates_tail_candidate_when_enabled() -> None:
     )
     assert signal is not None
     assert (signal.signal_mode or "").startswith("tail_")
-    assert (signal.metadata_json or {}).get("tail_category") == "natural_disaster"
+    assert (signal.metadata_json or {}).get("tail_category") in {"price_target", "crypto_level"}

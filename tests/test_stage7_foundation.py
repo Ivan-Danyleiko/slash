@@ -226,9 +226,12 @@ def test_stage7_factory_uses_gemini_profile_when_key_present() -> None:
     settings.groq_api_key = ""
     settings.openrouter_api_key = ""
     adapter = get_stage7_adapter(settings)
-    # Single key → direct OpenAICompatibleAdapter (no fallback wrapper needed)
-    assert isinstance(adapter, OpenAICompatibleAdapter)
-    assert "generativelanguage.googleapis.com" in adapter.api_base_url
+    # PlainApiAdapter is always appended as last-resort fallback, so single real key
+    # yields FallbackAdapter([OpenAICompatibleAdapter(gemini), PlainApiAdapter]).
+    assert isinstance(adapter, FallbackAdapter)
+    first = adapter._adapters[0]
+    assert isinstance(first, OpenAICompatibleAdapter)
+    assert "generativelanguage.googleapis.com" in first.api_base_url
 
 
 def test_stage7_factory_falls_back_to_plain_when_profile_key_missing() -> None:

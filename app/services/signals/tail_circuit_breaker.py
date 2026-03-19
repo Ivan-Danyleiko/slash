@@ -15,9 +15,13 @@ def _category_limit_map(settings: Settings) -> dict[str, float]:
     return {
         "crypto": float(settings.signal_tail_category_limit_crypto),
         "crypto_level": float(settings.signal_tail_category_limit_crypto),
+        "price_target": float(settings.signal_tail_category_limit_crypto),
         "natural_disaster": float(settings.signal_tail_category_limit_disasters),
         "political_stability": float(settings.signal_tail_category_limit_geopolitics),
+        "geopolitical_event": float(settings.signal_tail_category_limit_geopolitics),
         "sports_outcome": float(settings.signal_tail_category_limit_sports),
+        "sports_match": float(settings.signal_tail_category_limit_sports),
+        "earnings_surprise": float(settings.signal_tail_category_limit_regulatory),
         "regulatory": float(settings.signal_tail_category_limit_regulatory),
         "zero_event": float(settings.signal_tail_category_limit_zero_event),
     }

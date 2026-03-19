@@ -307,7 +307,7 @@ def _estimate_our_prob_yes(
     if isinstance(cross_platform, (int, float)):
         return min(0.95, max(0.05, float(cross_platform)))
 
-    if str(signal.signal_mode or "").lower() == "momentum":
+    if str(signal.signal_mode or "").lower() in ("momentum", "uncertainty_liquid"):
         current = float(market.probability_yes or 0.5)
         signed_recent = meta.get("signed_recent_move")
         recent_move = meta.get("recent_move")
@@ -506,7 +506,13 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
             days_to_res = max(0.5, (market.resolution_time - now).total_seconds() / 86400.0)
 
         ev_bundle: dict[str, Any] = s7.evidence_bundle or {}
-        ev_pct = float(ev_bundle.get("expected_ev_pct") or signal.divergence_score or 0.0)
+        _internal = ev_bundle.get("internal_metrics_snapshot") or {}
+        ev_pct = float(
+            ev_bundle.get("expected_ev_pct")
+            or _internal.get("expected_ev_pct")
+            or signal.divergence_score
+            or 0.0
+        )
         if ev_pct <= 0.0 and signal.confidence_score:
             ev_pct = float(signal.confidence_score) * 0.05
         daily_ev = ev_pct / max(1.0, days_to_res)

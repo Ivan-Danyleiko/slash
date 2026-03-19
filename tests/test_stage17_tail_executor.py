@@ -25,11 +25,12 @@ def test_stage17_cycle_opens_and_closes_positions() -> None:
     market = Market(
         platform_id=platform.id,
         external_market_id="tail-cycle-1",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.04,
+        title="Will Bitcoin reach $150000 by Dec 31, 2026?",
+        probability_yes=0.05,
         status="active",
         volume_24h=20_000.0,
         liquidity_value=50_000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=30),
     )
     db.add(market)
     db.flush()
@@ -41,13 +42,13 @@ def test_stage17_cycle_opens_and_closes_positions() -> None:
         summary="tail candidate",
         confidence_score=0.7,
         signal_mode="tail_stability",
-        signal_direction="NO",
+        signal_direction="YES",
         metadata_json={
-            "tail_category": "natural_disaster",
+            "tail_category": "price_target",
             "tail_mispricing_ratio": 2.5,
-            "tail_our_prob": 0.01,
-            "tail_market_prob": 0.04,
-            "reason_codes": ["tail_category:natural_disaster"],
+            "tail_our_prob": 0.12,
+            "tail_market_prob": 0.05,
+            "reason_codes": ["tail_category:price_target"],
         },
     )
     db.add(signal)
@@ -56,7 +57,7 @@ def test_stage17_cycle_opens_and_closes_positions() -> None:
     settings = get_settings().model_copy(
         update={
             "signal_tail_enabled": True,
-            "signal_tail_reference_balance_usd": 100.0,
+            "signal_tail_reference_balance_usd": 1000.0,
             "signal_tail_notional_pct": 0.005,
         }
     )
@@ -65,12 +66,12 @@ def test_stage17_cycle_opens_and_closes_positions() -> None:
 
     row = db.scalar(select(Stage17TailPosition).where(Stage17TailPosition.status == "OPEN").limit(1))
     assert row is not None
-    assert row.direction == "NO"
+    assert row.direction == "YES"
     assert float(row.shares_count or 0.0) > 0.0
     assert float(row.current_multiplier or 0.0) >= 1.0
 
     market.status = "resolved"
-    market.source_payload = {"resolvedOutcome": "no"}
+    market.source_payload = {"resolvedOutcome": "yes"}
     market.resolution_time = datetime.now(UTC) - timedelta(hours=1)
     db.add(market)
     db.commit()
@@ -125,7 +126,7 @@ def test_stage17_cycle_narrative_fade_uses_llm_fallback_hash() -> None:
         update={
             "signal_tail_enabled": True,
             "stage7_agent_real_calls_enabled": False,
-            "signal_tail_reference_balance_usd": 100.0,
+            "signal_tail_reference_balance_usd": 1000.0,
             "signal_tail_notional_pct": 0.005,
             "signal_tail_llm_prompt_version": "tail_v1",
         }
@@ -163,11 +164,12 @@ def test_stage17_cycle_skips_duplicate_open_market_positions() -> None:
     market = Market(
         platform_id=platform.id,
         external_market_id="tail-cycle-3",
-        title="Will there be a major earthquake today?",
-        probability_yes=0.03,
+        title="Will Bitcoin reach $170000 by Dec 31, 2026?",
+        probability_yes=0.05,
         status="active",
         volume_24h=15_000.0,
         liquidity_value=40_000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=21),
     )
     db.add(market)
     db.flush()
@@ -181,12 +183,12 @@ def test_stage17_cycle_skips_duplicate_open_market_positions() -> None:
                 summary="tail candidate",
                 confidence_score=0.7,
                 signal_mode="tail_stability",
-                signal_direction="NO",
+                signal_direction="YES",
                 metadata_json={
-                    "tail_category": "natural_disaster",
+                    "tail_category": "price_target",
                     "tail_mispricing_ratio": 2.5,
-                    "tail_our_prob": 0.01,
-                    "tail_market_prob": 0.03,
+                    "tail_our_prob": 0.12,
+                    "tail_market_prob": 0.05,
                 },
             ),
             Signal(
@@ -197,12 +199,12 @@ def test_stage17_cycle_skips_duplicate_open_market_positions() -> None:
                 summary="tail candidate",
                 confidence_score=0.7,
                 signal_mode="tail_stability",
-                signal_direction="NO",
+                signal_direction="YES",
                 metadata_json={
-                    "tail_category": "natural_disaster",
+                    "tail_category": "price_target",
                     "tail_mispricing_ratio": 2.6,
-                    "tail_our_prob": 0.01,
-                    "tail_market_prob": 0.03,
+                    "tail_our_prob": 0.13,
+                    "tail_market_prob": 0.05,
                 },
             ),
         ]
@@ -212,7 +214,7 @@ def test_stage17_cycle_skips_duplicate_open_market_positions() -> None:
     settings = get_settings().model_copy(
         update={
             "signal_tail_enabled": True,
-            "signal_tail_reference_balance_usd": 100.0,
+            "signal_tail_reference_balance_usd": 1000.0,
             "signal_tail_notional_pct": 0.005,
         }
     )
@@ -228,11 +230,12 @@ def test_stage17_cycle_applies_notional_hard_cap() -> None:
     market = Market(
         platform_id=platform.id,
         external_market_id="tail-cycle-4",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.04,
+        title="Will Bitcoin reach $180000 by Dec 31, 2026?",
+        probability_yes=0.06,
         status="active",
         volume_24h=50_000.0,
         liquidity_value=100_000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=45),
     )
     db.add(market)
     db.flush()
@@ -244,12 +247,12 @@ def test_stage17_cycle_applies_notional_hard_cap() -> None:
         summary="tail candidate",
         confidence_score=0.7,
         signal_mode="tail_stability",
-        signal_direction="NO",
+        signal_direction="YES",
         metadata_json={
-            "tail_category": "natural_disaster",
+            "tail_category": "price_target",
             "tail_mispricing_ratio": 2.0,
-            "tail_our_prob": 0.01,
-            "tail_market_prob": 0.04,
+            "tail_our_prob": 0.14,
+            "tail_market_prob": 0.06,
         },
     )
     db.add(signal)
@@ -278,11 +281,12 @@ def test_stage17_cycle_does_not_close_without_explicit_resolution_payload() -> N
     market = Market(
         platform_id=platform.id,
         external_market_id="tail-cycle-5",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.04,
+        title="Will Bitcoin reach $190000 by Dec 31, 2026?",
+        probability_yes=0.05,
         status="active",
         volume_24h=20_000.0,
         liquidity_value=50_000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=35),
     )
     db.add(market)
     db.flush()
@@ -294,12 +298,12 @@ def test_stage17_cycle_does_not_close_without_explicit_resolution_payload() -> N
         summary="tail candidate",
         confidence_score=0.7,
         signal_mode="tail_stability",
-        signal_direction="NO",
+        signal_direction="YES",
         metadata_json={
-            "tail_category": "natural_disaster",
+            "tail_category": "price_target",
             "tail_mispricing_ratio": 2.5,
-            "tail_our_prob": 0.01,
-            "tail_market_prob": 0.04,
+            "tail_our_prob": 0.13,
+            "tail_market_prob": 0.05,
         },
     )
     db.add(signal)
@@ -307,7 +311,7 @@ def test_stage17_cycle_does_not_close_without_explicit_resolution_payload() -> N
     settings = get_settings().model_copy(
         update={
             "signal_tail_enabled": True,
-            "signal_tail_reference_balance_usd": 100.0,
+            "signal_tail_reference_balance_usd": 1000.0,
             "signal_tail_notional_pct": 0.005,
         }
     )

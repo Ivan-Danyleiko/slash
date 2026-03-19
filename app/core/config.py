@@ -147,10 +147,19 @@ class Settings(BaseSettings):
     signal_mode_momentum_min_move: float = Field(default=0.10, alias="SIGNAL_MODE_MOMENTUM_MIN_MOVE")
     signal_mode_uncertainty_max_score: float = Field(default=0.65, alias="SIGNAL_MODE_UNCERTAINTY_MAX_SCORE")
     signal_tail_enabled: bool = Field(default=False, alias="SIGNAL_TAIL_ENABLED")
-    signal_tail_min_prob: float = Field(default=0.005, alias="SIGNAL_TAIL_MIN_PROB")
-    signal_tail_max_prob: float = Field(default=0.10, alias="SIGNAL_TAIL_MAX_PROB")
+    signal_tail_min_prob: float = Field(default=0.03, alias="SIGNAL_TAIL_MIN_PROB")
+    signal_tail_max_prob: float = Field(default=0.25, alias="SIGNAL_TAIL_MAX_PROB")
     signal_tail_min_mispricing_ratio: float = Field(default=2.0, alias="SIGNAL_TAIL_MIN_MISPRICING_RATIO")
+    signal_tail_min_our_prob: float = Field(default=0.08, alias="SIGNAL_TAIL_MIN_OUR_PROB")
+    signal_tail_max_market_prob_for_entry: float = Field(default=0.20, alias="SIGNAL_TAIL_MAX_MARKET_PROB_FOR_ENTRY")
+    signal_tail_min_koef: float = Field(default=5.0, alias="SIGNAL_TAIL_MIN_KOEF")
+    signal_tail_sweet_spot_koef_min: float = Field(default=10.0, alias="SIGNAL_TAIL_SWEET_SPOT_KOEF_MIN")
+    signal_tail_sweet_spot_koef_max: float = Field(default=50.0, alias="SIGNAL_TAIL_SWEET_SPOT_KOEF_MAX")
+    signal_tail_max_koef: float = Field(default=200.0, alias="SIGNAL_TAIL_MAX_KOEF")
+    signal_tail_max_days_to_resolution: int = Field(default=90, alias="SIGNAL_TAIL_MAX_DAYS_TO_RESOLUTION")
+    signal_tail_min_volume_usd: float = Field(default=500.0, alias="SIGNAL_TAIL_MIN_VOLUME_USD")
     signal_tail_max_candidates: int = Field(default=20, alias="SIGNAL_TAIL_MAX_CANDIDATES")
+    signal_tail_max_positions_open: int = Field(default=100, alias="SIGNAL_TAIL_MAX_POSITIONS_OPEN")
     signal_tail_base_rate_external_enabled: bool = Field(
         default=False,
         alias="SIGNAL_TAIL_BASE_RATE_EXTERNAL_ENABLED",
@@ -158,14 +167,19 @@ class Settings(BaseSettings):
     signal_tail_budget_pct: float = Field(default=0.10, alias="SIGNAL_TAIL_BUDGET_PCT")
     signal_tail_notional_pct: float = Field(default=0.005, alias="SIGNAL_TAIL_NOTIONAL_PCT")
     signal_tail_reference_balance_usd: float = Field(
-        default=100.0, alias="SIGNAL_TAIL_REFERENCE_BALANCE_USD"
+        default=1000.0, alias="SIGNAL_TAIL_REFERENCE_BALANCE_USD"
     )
-    signal_tail_category_limit_crypto: float = Field(default=0.04, alias="SIGNAL_TAIL_CATEGORY_LIMIT_CRYPTO")
+    signal_tail_max_single_bet_usd: float = Field(default=25.0, alias="SIGNAL_TAIL_MAX_SINGLE_BET_USD")
+    signal_tail_take_profit_ratio: float = Field(default=0.50, alias="SIGNAL_TAIL_TAKE_PROFIT_RATIO")
+    signal_tail_stop_loss_floor_mult: float = Field(default=0.30, alias="SIGNAL_TAIL_STOP_LOSS_FLOOR_MULT")
+    signal_tail_days_before_resolution_exit: int = Field(default=3, alias="SIGNAL_TAIL_DAYS_BEFORE_RESOLUTION_EXIT")
+    signal_tail_min_mark_to_hold_mult: float = Field(default=1.5, alias="SIGNAL_TAIL_MIN_MARK_TO_HOLD_MULT")
+    signal_tail_category_limit_crypto: float = Field(default=0.20, alias="SIGNAL_TAIL_CATEGORY_LIMIT_CRYPTO")
     signal_tail_category_limit_disasters: float = Field(default=0.03, alias="SIGNAL_TAIL_CATEGORY_LIMIT_DISASTERS")
-    signal_tail_category_limit_geopolitics: float = Field(default=0.02, alias="SIGNAL_TAIL_CATEGORY_LIMIT_GEOPOLITICS")
-    signal_tail_category_limit_sports: float = Field(default=0.02, alias="SIGNAL_TAIL_CATEGORY_LIMIT_SPORTS")
-    signal_tail_category_limit_regulatory: float = Field(default=0.01, alias="SIGNAL_TAIL_CATEGORY_LIMIT_REGULATORY")
-    signal_tail_category_limit_zero_event: float = Field(default=0.02, alias="SIGNAL_TAIL_CATEGORY_LIMIT_ZERO_EVENT")
+    signal_tail_category_limit_geopolitics: float = Field(default=0.20, alias="SIGNAL_TAIL_CATEGORY_LIMIT_GEOPOLITICS")
+    signal_tail_category_limit_sports: float = Field(default=0.20, alias="SIGNAL_TAIL_CATEGORY_LIMIT_SPORTS")
+    signal_tail_category_limit_regulatory: float = Field(default=0.20, alias="SIGNAL_TAIL_CATEGORY_LIMIT_REGULATORY")
+    signal_tail_category_limit_zero_event: float = Field(default=0.20, alias="SIGNAL_TAIL_CATEGORY_LIMIT_ZERO_EVENT")
     signal_tail_circuit_breaker_consecutive_losses: int = Field(
         default=3, alias="SIGNAL_TAIL_CIRCUIT_BREAKER_CONSECUTIVE_LOSSES"
     )
@@ -176,15 +190,15 @@ class Settings(BaseSettings):
     signal_tail_llm_prompt_version: str = Field(default="tail_v1", alias="SIGNAL_TAIL_LLM_PROMPT_VERSION")
     stage17_tail_min_closed_positions: int = Field(default=40, alias="STAGE17_TAIL_MIN_CLOSED_POSITIONS")
     stage17_tail_min_top10pct_wins_count: int = Field(default=3, alias="STAGE17_TAIL_MIN_TOP10PCT_WINS_COUNT")
-    stage17_tail_min_hit_rate: float = Field(default=0.60, alias="STAGE17_TAIL_MIN_HIT_RATE")
+    stage17_tail_min_hit_rate: float = Field(default=0.10, alias="STAGE17_TAIL_MIN_HIT_RATE")
     stage17_tail_min_payout_skew: float = Field(default=0.50, alias="STAGE17_TAIL_MIN_PAYOUT_SKEW")
     stage17_tail_min_payout_skew_ci_low_80: float = Field(
         default=0.35, alias="STAGE17_TAIL_MIN_PAYOUT_SKEW_CI_LOW_80"
     )
     stage17_tail_max_time_to_resolution_days: float = Field(
-        default=30.0, alias="STAGE17_TAIL_MAX_TIME_TO_RESOLUTION_DAYS"
+        default=45.0, alias="STAGE17_TAIL_MAX_TIME_TO_RESOLUTION_DAYS"
     )
-    stage17_tail_min_avg_win_multiplier: float = Field(default=5.0, alias="STAGE17_TAIL_MIN_AVG_WIN_MULTIPLIER")
+    stage17_tail_min_avg_win_multiplier: float = Field(default=8.0, alias="STAGE17_TAIL_MIN_AVG_WIN_MULTIPLIER")
     stage17_tail_bootstrap_resamples: int = Field(default=1000, alias="STAGE17_TAIL_BOOTSTRAP_RESAMPLES")
     signal_rules_missing_daily_cap: int = Field(default=8, alias="SIGNAL_RULES_MISSING_DAILY_CAP")
     snapshot_fresh_hours: int = Field(default=6, alias="SNAPSHOT_FRESH_HOURS")

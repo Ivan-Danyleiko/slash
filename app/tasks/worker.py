@@ -405,8 +405,8 @@ celery_app.conf.beat_schedule = {
         "task": "stage17_batch",
         "schedule": crontab(hour=3, minute=40),
     },
-    "stage17-cycle-every-30-min": {
+    "stage17-cycle-every-15-min": {
         "task": "stage17_cycle",
-        "schedule": crontab(minute="20,50"),
+        "schedule": crontab(minute="*/15"),
     },
 }

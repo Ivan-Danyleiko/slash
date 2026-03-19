@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -20,13 +22,15 @@ def test_tail_classifier_category_detection() -> None:
     market = Market(
         platform_id=1,
         external_market_id="tc-1",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.03,
+        title="Will Bitcoin reach $150000 by Dec 31, 2026?",
+        probability_yes=0.05,
+        volume_24h=1000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=30),
     )
     out = classify_tail_event(market, settings=settings)
     assert out is not None
     assert out.get("eligible") is True
-    assert out.get("tail_category") == "natural_disaster"
+    assert out.get("tail_category") in {"price_target", "crypto_level"}
 
 
 def test_tail_classifier_ambiguity_hard_block() -> None:
@@ -35,9 +39,11 @@ def test_tail_classifier_ambiguity_hard_block() -> None:
     market = Market(
         platform_id=1,
         external_market_id="tc-2",
-        title="Will there be exactly 0 earthquakes tomorrow?",
+        title="Will Team A win the championship final?",
         rules_text="Resolution source: TBD by admin decision.",
         probability_yes=0.04,
+        volume_24h=1200.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=7),
     )
     out = classify_tail_event(market, settings=settings)
     assert out is not None
@@ -51,8 +57,10 @@ def test_tail_classifier_rejects_non_finite_probability() -> None:
     market = Market(
         platform_id=1,
         external_market_id="tc-3",
-        title="Will there be exactly 0 earthquakes tomorrow?",
+        title="Will Team A win match?",
         probability_yes=float("nan"),
+        volume_24h=1200.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=7),
     )
     out = classify_tail_event(market, settings=settings)
     assert out is None
@@ -64,8 +72,10 @@ def test_tail_classifier_handles_large_rules_text() -> None:
     market = Market(
         platform_id=1,
         external_market_id="tc-4",
-        title="Will there be a hurricane in Florida this week?",
-        probability_yes=0.03,
+        title="Will Bitcoin reach $200000 this year?",
+        probability_yes=0.05,
+        volume_24h=3000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=14),
         rules_text=("official source: USGS. " + ("x" * 120_000)),
     )
     out = classify_tail_event(market, settings=settings)

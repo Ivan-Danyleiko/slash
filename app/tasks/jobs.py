@@ -47,6 +47,22 @@ from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.telegram_product import TelegramProductService
 
 
+def _send_stage17_telegram_message(settings, text: str) -> bool:
+    token = str(settings.telegram_bot_token or "").strip()
+    chat_id = str(settings.telegram_chat_id or "").strip()
+    if not token or not chat_id:
+        return False
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _cleanup_stale_running_jobs(
     db: Session,
     *,
@@ -770,6 +786,22 @@ def stage17_cycle_job(
     try:
         settings = get_settings()
         result = run_stage17_tail_cycle(db, settings=settings, limit=limit)
+        opened_alerts = list(result.get("opened_alerts") or [])
+        win_alerts = list(result.get("win_alerts") or [])
+        telegram_sent = 0
+        for item in opened_alerts:
+            txt = (
+                "🔥 STAGE17 OPEN\n"
+                f"{item.get('title')}\n"
+                f"Koef x{item.get('koef')}\n"
+                f"our_prob={item.get('our_prob')} vs market={item.get('market_prob')}\n"
+                f"bet=${item.get('notional_usd')}"
+            )
+            telegram_sent += 1 if _send_stage17_telegram_message(settings, txt) else 0
+        for item in win_alerts:
+            txt = f"🎉 WIN x{item.get('koef')}: {item.get('title')} | +${item.get('profit_usd')}"
+            telegram_sent += 1 if _send_stage17_telegram_message(settings, txt) else 0
+        result["telegram_sent"] = int(telegram_sent)
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
@@ -793,6 +825,16 @@ def stage17_batch_job(
             cycle_limit=cycle_limit,
         )
         summary = ((report.get("reports") or {}).get("stage17_tail_report") or {}).get("summary") or {}
+        digest_text = (
+            "📊 STAGE17 DAILY\n"
+            f"hit_rate={summary.get('hit_rate_tail')}\n"
+            f"roi={summary.get('roi_total')}\n"
+            f"open_positions={summary.get('open_positions')}\n"
+            f"avg_koef={summary.get('avg_koef')}\n"
+            f"final={summary.get('final_decision')}"
+        )
+        telegram_sent = _send_stage17_telegram_message(settings, digest_text)
+        report["telegram_sent"] = bool(telegram_sent)
         _finish_job(
             db,
             job,
@@ -801,6 +843,7 @@ def stage17_batch_job(
                 "final_decision": str(((report.get("reports") or {}).get("stage17_tail_report") or {}).get("final_decision") or ""),
                 "closed_positions": int(summary.get("closed_positions") or 0),
                 "payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
+                "telegram_sent": bool(telegram_sent),
             },
         )
         return {"status": "ok", "result": report}

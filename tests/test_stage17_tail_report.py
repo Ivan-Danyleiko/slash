@@ -51,6 +51,9 @@ def test_stage17_tail_report_acceptance_passes_with_skewed_wins() -> None:
     loss_pnls = [-1.0] * 15
     all_pnls = win_pnls + loss_pnls
     for idx, pnl in enumerate(all_pnls):
+        opened_at = now - timedelta(days=10, hours=idx)
+        if idx < 6:
+            opened_at = now - timedelta(hours=idx + 1)
         db.add(
             Stage17TailPosition(
                 market_id=100 + idx,
@@ -60,8 +63,10 @@ def test_stage17_tail_report_acceptance_passes_with_skewed_wins() -> None:
                 status="CLOSED",
                 entry_price=0.02,
                 notional_usd=0.5,
+                koef_entry=10.0,
+                days_to_resolution_entry=20.0,
                 realized_pnl_usd=pnl,
-                opened_at=now - timedelta(days=10, hours=idx),
+                opened_at=opened_at,
                 closed_at=now - timedelta(days=3, hours=idx),
             )
         )
@@ -85,7 +90,7 @@ def test_stage17_tail_report_acceptance_passes_with_skewed_wins() -> None:
     assert checks.get("hit_rate_tail_ge_min") is True
     assert checks.get("payout_skew_ge_min") is True
     assert checks.get("payout_skew_ci_low_80_ge_min") is True
-    assert checks.get("time_to_resolution_median_days_le_max") is True
+    assert checks.get("max_avg_days_to_res") is True
     assert checks.get("avg_win_multiplier_ge_min") is True
     by_variation = dict(report.get("by_variation") or {})
     assert "tail_stability" in by_variation

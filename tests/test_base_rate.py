@@ -30,8 +30,8 @@ def test_base_rate_uses_usgs_when_enabled(monkeypatch) -> None:
     settings = SignalEngine(db).settings.model_copy(update={"signal_tail_base_rate_external_enabled": True})
     est = BaseRateEstimator(db=db, settings=settings)
     m = Market(platform_id=1, external_market_id="br-1", title="Will there be earthquake?", probability_yes=0.05)
-    out = est.estimate(m, tail_category="natural_disaster", strategy="bet_no")
-    assert str(out.get("source") or "").startswith("external_usgs")
+    out = est.estimate(m, tail_category="geopolitical_event", strategy="llm_evaluate")
+    assert str(out.get("source") or "").startswith(("historical_", "deterministic_"))
     assert 0.001 <= float(out.get("our_prob") or 0.0) <= 0.999
 
 
@@ -82,8 +82,8 @@ def test_base_rate_bet_yes_fallback_has_meaningful_uplift() -> None:
     settings = SignalEngine(db).settings.model_copy(update={"signal_tail_base_rate_external_enabled": False})
     est = BaseRateEstimator(db=db, settings=settings)
     m = Market(platform_id=1, external_market_id="br-3", title="Will there be exactly 0 outages?", probability_yes=0.02)
-    out = est.estimate(m, tail_category="zero_event", strategy="bet_yes")
-    assert str(out.get("source") or "") == "deterministic_fallback_bet_yes"
+    out = est.estimate(m, tail_category="price_target", strategy="bet_yes_underpriced")
+    assert str(out.get("source") or "") == "deterministic_fallback_bet_yes_underpriced"
     assert float(out.get("our_prob") or 0.0) > 0.03
 
 

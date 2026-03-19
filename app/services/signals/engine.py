@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 import re
 
-from sqlalchemy import and_, delete, exists, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -1403,6 +1403,12 @@ class SignalEngine:
         unknown_category_skipped = 0
         max_candidates = max(1, int(self.settings.signal_tail_max_candidates))
         min_mispricing = max(0.0, float(self.settings.signal_tail_min_mispricing_ratio))
+        min_our_prob = max(0.0, float(self.settings.signal_tail_min_our_prob))
+        max_market_prob = min(1.0, max(0.0, float(self.settings.signal_tail_max_market_prob_for_entry)))
+        min_koef = max(1.0, float(self.settings.signal_tail_min_koef))
+        max_koef = max(min_koef, float(self.settings.signal_tail_max_koef))
+        max_days = max(1, int(self.settings.signal_tail_max_days_to_resolution))
+        min_volume = max(0.0, float(self.settings.signal_tail_min_volume_usd))
         ref_balance = max(1.0, float(self.settings.signal_tail_reference_balance_usd))
         raw_notional = ref_balance * max(0.0, float(self.settings.signal_tail_notional_pct))
         # Hard risk cap: single tail position cannot exceed 5% reference balance.
@@ -1433,6 +1439,20 @@ class SignalEngine:
             self.db.scalars(
                 select(Market)
                 .where(Market.probability_yes.is_not(None))
+                .where(Market.probability_yes >= float(self.settings.signal_tail_min_prob))
+                .where(Market.probability_yes <= float(self.settings.signal_tail_max_prob))
+                .where(
+                    func.coalesce(
+                        Market.volume_24h,
+                        Market.notional_value_dollars,
+                        Market.liquidity_value,
+                        0.0,
+                    )
+                    >= min_volume
+                )
+                .where(Market.resolution_time.is_not(None))
+                .where(Market.resolution_time <= (datetime.now(UTC) + timedelta(days=max_days)))
+                .where(~Market.status.in_(["resolved", "closed", "settled", "final", "ended"]))
                 .order_by(Market.probability_yes.asc(), Market.fetched_at.desc())
                 .limit(max_candidates * 20)
             )
@@ -1468,19 +1488,29 @@ class SignalEngine:
             if tail_category not in {
                 "crypto",
                 "crypto_level",
-                "natural_disaster",
-                "political_stability",
-                "sports_outcome",
+                "price_target",
+                "geopolitical_event",
+                "sports_match",
+                "earnings_surprise",
                 "regulatory",
-                "zero_event",
             }:
                 unknown_category_skipped += 1
                 continue
             base_rate = estimator.estimate(market, tail_category=tail_category, strategy=tail_strategy)
             market_prob = float(tail.get("market_prob") or market.probability_yes or 0.5)
             our_prob = float(base_rate.get("our_prob") or market_prob)
+            koef = 1.0 / max(1e-6, market_prob)
+            if market_prob > max_market_prob:
+                below_mispricing += 1
+                continue
+            if koef < min_koef or koef > max_koef:
+                below_mispricing += 1
+                continue
+            if our_prob < min_our_prob:
+                below_mispricing += 1
+                continue
             mispricing_ratio = tail_mispricing_ratio(market_prob=market_prob, our_prob=our_prob)
-            if mispricing_ratio < min_mispricing:
+            if (our_prob <= (market_prob * min_mispricing)) or (mispricing_ratio < min_mispricing):
                 below_mispricing += 1
                 continue
 
@@ -1495,9 +1525,7 @@ class SignalEngine:
                 by_category_limit += 1
                 continue
 
-            signal_direction = str(tail.get("direction") or "TBD").upper()
-            if signal_direction not in ("YES", "NO"):
-                signal_direction = "YES" if our_prob >= market_prob else "NO"
+            signal_direction = "YES"
             source_name = str(base_rate.get("source") or "")
             if source_name.startswith("external_") or source_name.startswith("historical_"):
                 tail_variation = "tail_base_rate"
@@ -1521,6 +1549,8 @@ class SignalEngine:
                 "tail_strategy": tail_strategy,
                 "tail_market_prob": round(market_prob, 6),
                 "tail_our_prob": round(our_prob, 6),
+                "tail_koef": round(koef, 6),
+                "tail_days_to_resolution": float(tail.get("days_to_resolution") or 0.0),
                 "tail_mispricing_ratio": round(mispricing_ratio, 6),
                 "tail_base_rate_source": source_name,
                 "tail_base_rate_reasoning": str(base_rate.get("reasoning") or ""),

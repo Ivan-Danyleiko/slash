@@ -143,6 +143,7 @@ def build_stage17_tail_report(
     )
     closed = [r for r in rows if str(r.status or "").upper() == "CLOSED" and r.closed_at is not None]
     open_rows = [r for r in rows if str(r.status or "").upper() == "OPEN"]
+    opened_last_24h = [r for r in rows if r.opened_at is not None and (r.opened_at if r.opened_at.tzinfo else r.opened_at.replace(tzinfo=UTC)) >= (now - timedelta(hours=24))]
     closed_pnls = [float(r.realized_pnl_usd or 0.0) for r in closed]
     closed_count = len(closed)
     wins_count = len([x for x in closed_pnls if x > 0.0])
@@ -172,6 +173,17 @@ def build_stage17_tail_report(
             continue
         win_multipliers.append(1.0 + (pnl / notional))
     avg_win_multiplier = float(sum(win_multipliers) / len(win_multipliers)) if win_multipliers else None
+    best_win_koef = max([float(r.koef_entry or 0.0) for r in closed if float(r.realized_pnl_usd or 0.0) > 0.0], default=0.0)
+    avg_koef = (
+        float(sum(float(r.koef_entry or 0.0) for r in rows if (r.koef_entry or 0.0) > 0.0))
+        / max(1, len([1 for r in rows if (r.koef_entry or 0.0) > 0.0]))
+    )
+    avg_days_to_res = (
+        float(sum(float(r.days_to_resolution_entry or 0.0) for r in rows if (r.days_to_resolution_entry or 0.0) > 0.0))
+        / max(1, len([1 for r in rows if (r.days_to_resolution_entry or 0.0) > 0.0]))
+    )
+    total_notional_closed = float(sum(float(r.notional_usd or 0.0) for r in closed))
+    roi_total = (float(sum(closed_pnls)) / total_notional_closed) if total_notional_closed > 0 else 0.0
 
     max_concurrent = _max_concurrent_positions(rows)
     ref_balance = max(1.0, float(settings.signal_tail_reference_balance_usd))
@@ -200,17 +212,26 @@ def build_stage17_tail_report(
     max_ttr_days = float(settings.stage17_tail_max_time_to_resolution_days)
     min_avg_win_multiplier = float(settings.stage17_tail_min_avg_win_multiplier)
     checks = {
+        "min_open_positions_per_day": len(opened_last_24h) >= 5,
+        "min_avg_koef": avg_koef >= 5.0,
+        "max_avg_days_to_res": avg_days_to_res <= max_ttr_days,
+        "no_positions_after_2027": all(
+            (
+                r.resolution_deadline is None
+                or (r.resolution_deadline.year <= 2027)
+            )
+            for r in rows
+        ),
         "closed_positions_ge_min": closed_count >= min_closed,
         "top10pct_wins_count_ge_min": top10_count >= min_top10,
         "hit_rate_tail_ge_min": hit_rate >= min_hit_rate,
         "payout_skew_ge_min": payout >= min_skew,
         "payout_skew_ci_low_80_ge_min": ci_low >= min_skew_ci,
-        "time_to_resolution_median_days_le_max": (
-            (median_ttr_days is not None) and (median_ttr_days <= max_ttr_days)
-        ),
         "avg_win_multiplier_ge_min": (
             (avg_win_multiplier is not None) and (avg_win_multiplier >= min_avg_win_multiplier)
         ),
+        "hit_rate_after_50_closed": (closed_count < 50) or (hit_rate >= 0.08),
+        "roi_after_100_closed": (closed_count < 100) or (roi_total > 0.0),
     }
     if not checks["closed_positions_ge_min"] or not checks["top10pct_wins_count_ge_min"]:
         final_decision = "NO_GO_DATA_PENDING"
@@ -233,8 +254,13 @@ def build_stage17_tail_report(
         "payout_skew_ci_low_80": round(ci_low, 6),
         "payout_skew_ci_high_80": round(ci_high, 6),
         "top10pct_wins_count": int(top10_count),
+        "opened_last_24h": len(opened_last_24h),
         "time_to_resolution_median_hours": round(median_ttr_h, 3) if median_ttr_h is not None else None,
         "time_to_resolution_median_days": round(median_ttr_days, 3) if median_ttr_days is not None else None,
+        "avg_days_to_resolution_entry": round(avg_days_to_res, 3),
+        "avg_koef": round(avg_koef, 4),
+        "best_win_koef": round(best_win_koef, 4),
+        "roi_total": round(roi_total, 6),
         "avg_win_multiplier": round(avg_win_multiplier, 4) if avg_win_multiplier is not None else None,
         "max_concurrent_tail_positions": int(max_concurrent),
         "tail_budget_total_usd": round(budget_total, 4),
@@ -247,9 +273,12 @@ def build_stage17_tail_report(
             "min_closed_positions": min_closed,
             "min_top10pct_wins_count": min_top10,
             "min_hit_rate": min_hit_rate,
+            "min_avg_koef": 5.0,
+            "max_avg_days_to_resolution": max_ttr_days,
             "min_payout_skew": min_skew,
             "min_payout_skew_ci_low_80": min_skew_ci,
-            "max_time_to_resolution_days": max_ttr_days,
+            "hit_rate_after_50_closed": 0.08,
+            "roi_after_100_closed": 0.0,
             "min_avg_win_multiplier": min_avg_win_multiplier,
         },
         "final_decision": final_decision,
@@ -308,6 +337,9 @@ def extract_stage17_tail_report_metrics(report: dict[str, Any]) -> dict[str, flo
     return {
         "stage17_closed_positions": float(summary.get("closed_positions") or 0.0),
         "stage17_hit_rate_tail": float(summary.get("hit_rate_tail") or 0.0),
+        "stage17_roi_total": float(summary.get("roi_total") or 0.0),
+        "stage17_avg_koef": float(summary.get("avg_koef") or 0.0),
+        "stage17_best_win_koef": float(summary.get("best_win_koef") or 0.0),
         "stage17_payout_skew": float(summary.get("payout_skew") or 0.0),
         "stage17_payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
         "stage17_top10pct_wins_count": float(summary.get("top10pct_wins_count") or 0.0),

@@ -98,9 +98,9 @@ def _build_openai_compatible_adapter(settings: Settings) -> OpenAICompatibleAdap
     )
 
 
-def _build_all_adapters(settings: Settings) -> list[OpenAICompatibleAdapter]:
-    """Build all configured providers in priority order: groq → gemini → openrouter."""
-    adapters = []
+def _build_all_adapters(settings: Settings) -> list[Stage7Adapter]:
+    """Build all configured providers in priority order: groq → gemini → openrouter → plain fallback."""
+    adapters: list[Stage7Adapter] = []
     timeout = float(settings.stage7_openai_timeout_seconds)
 
     groq_key = str(settings.groq_api_key or "").strip()
@@ -136,6 +136,9 @@ def _build_all_adapters(settings: Settings) -> list[OpenAICompatibleAdapter]:
             extra_headers=extra,
         ))
 
+    # Always include PlainApiAdapter as deterministic last-resort fallback so that
+    # billing/quota errors on all LLM providers don't silently kill signal flow.
+    adapters.append(PlainApiAdapter())
     return adapters
 
 

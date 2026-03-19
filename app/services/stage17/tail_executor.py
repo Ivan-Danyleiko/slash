@@ -72,6 +72,22 @@ def _side_price(market: Market, direction: str) -> float:
     return p_yes if direction == "YES" else (1.0 - p_yes)
 
 
+def _calc_v2_notional_usd(
+    *,
+    settings: Settings,
+    reference_balance_usd: float,
+    confidence_score: float | None,
+    market_prob: float,
+) -> float:
+    conf = min(1.0, max(0.1, float(confidence_score or 0.5)))
+    koef = 1.0 / max(1e-6, float(market_prob))
+    scale = min(float(koef) / 10.0, 2.0)
+    base = float(reference_balance_usd) * max(0.0, float(settings.signal_tail_notional_pct))
+    raw = base * conf * scale
+    capped = min(float(settings.signal_tail_max_single_bet_usd), raw)
+    return max(0.5, capped)
+
+
 def _is_external_api_degraded(db: Session) -> tuple[bool, str]:
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=2)
@@ -115,8 +131,6 @@ def run_stage17_tail_cycle(
         }
 
     ref_balance = max(1.0, float(settings.signal_tail_reference_balance_usd))
-    raw_notional = ref_balance * max(0.0, float(settings.signal_tail_notional_pct))
-    notional_usd = min(max(0.05, raw_notional), ref_balance * 0.05)
     degraded, degraded_reason = _is_external_api_degraded(db)
     breaker_blocked, breaker_reason = check_tail_circuit_breaker(
         db,
@@ -138,6 +152,8 @@ def run_stage17_tail_cycle(
     opened = 0
     closed = 0
     skipped = 0
+    opened_alerts: list[dict[str, Any]] = []
+    win_alerts: list[dict[str, Any]] = []
     if not _acquire_tail_cycle_lock_if_supported(db):
         return {
             "enabled": True,
@@ -147,7 +163,13 @@ def run_stage17_tail_cycle(
             "breaker_blocked": True,
             "breaker_reason": "tail_cycle_lock_busy",
         }
+    open_positions_count = int(
+            db.scalar(select(func.count()).select_from(Stage17TailPosition).where(Stage17TailPosition.status == "OPEN"))
+            or 0
+    )
     if open_new and int(limit) > 0:
+        if open_positions_count >= int(settings.signal_tail_max_positions_open):
+            open_new = False
         candidates = list(
             db.scalars(
                 select(Signal)
@@ -164,6 +186,8 @@ def run_stage17_tail_cycle(
         candidates = []
     for signal in candidates:
         if opened >= max(1, int(limit)):
+            break
+        if (open_positions_count + opened) >= int(settings.signal_tail_max_positions_open):
             break
         existing = db.scalar(
             select(Stage17TailPosition)
@@ -190,9 +214,9 @@ def run_stage17_tail_cycle(
         metadata = signal.metadata_json if isinstance(signal.metadata_json, dict) else {}
         tail_category = str(metadata.get("tail_category") or "unknown")
         tail_variation = str(signal.signal_mode or metadata.get("tail_variation") or "tail_stability")
-        direction = str(signal.signal_direction or metadata.get("tail_direction") or "NO").upper()
+        direction = str(signal.signal_direction or metadata.get("tail_direction") or "YES").upper()
         if direction not in {"YES", "NO"}:
-            direction = "NO"
+            direction = "YES"
         model_version = str(metadata.get("tail_base_rate_source") or "deterministic")
         input_hash = None
         prompt_version_hash = None
@@ -228,6 +252,15 @@ def run_stage17_tail_cycle(
         if breaker_blocked:
             skipped += 1
             continue
+        market_prob = float(metadata.get("tail_market_prob") or market.probability_yes or 0.5)
+        our_prob = float(metadata.get("tail_our_prob") or market_prob)
+        koef = 1.0 / max(1e-6, market_prob)
+        notional_usd = _calc_v2_notional_usd(
+            settings=settings,
+            reference_balance_usd=ref_balance,
+            confidence_score=signal.confidence_score,
+            market_prob=market_prob,
+        )
         allowed, _cat_reason = can_open_tail_by_category(
             db,
             settings=settings,
@@ -240,6 +273,13 @@ def run_stage17_tail_cycle(
             skipped += 1
             continue
         entry_price = _side_price(market, direction)
+        resolution_deadline = market.resolution_time
+        if resolution_deadline is not None:
+            ref_deadline = resolution_deadline if resolution_deadline.tzinfo else resolution_deadline.replace(tzinfo=UTC)
+            max_days = max(1, int(settings.signal_tail_max_days_to_resolution))
+            if (ref_deadline - datetime.now(UTC)).total_seconds() / 86400.0 > max_days:
+                skipped += 1
+                continue
         row = Stage17TailPosition(
             signal_id=signal.id,
             market_id=market.id,
@@ -251,16 +291,19 @@ def run_stage17_tail_cycle(
             mark_price=entry_price,
             notional_usd=notional_usd,
             shares_count=(notional_usd / entry_price) if entry_price > 0 else None,
-            base_rate_prob=float(metadata.get("tail_our_prob") or 0.0) or None,
-            market_prob=float(metadata.get("tail_market_prob") or 0.0) or None,
+            base_rate_prob=our_prob,
+            market_prob=market_prob,
             mispricing_ratio=float(metadata.get("tail_mispricing_ratio") or 0.0) or None,
+            koef_entry=koef,
+            our_prob_entry=our_prob,
+            days_to_resolution_entry=float(metadata.get("tail_days_to_resolution") or 0.0) or None,
             reason_codes=reason_codes,
             input_hash=input_hash,
             model_version=model_version,
             prompt_version=prompt_version_hash or str(settings.signal_tail_llm_prompt_version),
             peak_mark_price=entry_price,
             current_multiplier=1.0 if entry_price > 0 else None,
-            resolution_deadline=market.resolution_time,
+            resolution_deadline=resolution_deadline,
         )
         db.add(row)
         db.flush()
@@ -272,6 +315,19 @@ def run_stage17_tail_cycle(
                 fee_usd=0.0,
                 fill_payload={"event": "open"},
             )
+        )
+        opened_alerts.append(
+            {
+                "signal_id": int(signal.id),
+                "market_id": int(market.id),
+                "title": str(market.title or signal.title or ""),
+                "tail_category": tail_category,
+                "koef": round(float(koef), 4),
+                "market_prob": round(float(market_prob), 6),
+                "our_prob": round(float(our_prob), 6),
+                "notional_usd": round(float(notional_usd), 4),
+                "direction": direction,
+            }
         )
         opened += 1
 
@@ -288,6 +344,31 @@ def run_stage17_tail_cycle(
             continue
         direction = str(row.direction or "NO").upper()
         mark = _side_price(market, direction)
+        # Stage17 v2 supports only YES tail positions. Retire legacy NO rows.
+        if direction == "NO":
+            if row.entry_price and row.entry_price > 0 and row.notional_usd and row.notional_usd > 0:
+                shares = float(row.notional_usd) / float(row.entry_price)
+                pnl = (shares * float(mark)) - float(row.notional_usd)
+            else:
+                pnl = 0.0
+            row.status = "CLOSED"
+            row.closed_at = datetime.now(UTC)
+            row.realized_pnl_usd = pnl
+            row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
+            row.current_multiplier = row.realized_multiplier
+            row.unrealized_pnl_usd = 0.0
+            row.close_reason = "legacy_direction_no_retired"
+            db.add(
+                Stage17TailFill(
+                    position_id=int(row.id),
+                    fill_price=mark,
+                    fill_size_usd=0.0,
+                    fee_usd=0.0,
+                    fill_payload={"event": row.close_reason},
+                )
+            )
+            closed += 1
+            continue
         row.mark_price = mark
         if row.entry_price and row.entry_price > 0:
             cur_mult = float(mark) / float(row.entry_price)
@@ -298,6 +379,78 @@ def run_stage17_tail_cycle(
             shares = float(row.notional_usd) / float(row.entry_price)
             mark_value = shares * mark
             row.unrealized_pnl_usd = mark_value - float(row.notional_usd)
+        # v2 exits for YES-tail strategy.
+        if direction == "YES" and row.entry_price and row.entry_price > 0:
+            take_profit_mark = float(row.entry_price) * (1.0 + float(settings.signal_tail_take_profit_ratio))
+            stop_loss_floor_mark = float(row.entry_price) * float(settings.signal_tail_stop_loss_floor_mult)
+            if float(mark) >= take_profit_mark:
+                shares = float(row.notional_usd) / float(row.entry_price)
+                pnl = (shares * float(mark)) - float(row.notional_usd)
+                row.status = "CLOSED"
+                row.closed_at = datetime.now(UTC)
+                row.realized_pnl_usd = pnl
+                row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
+                row.current_multiplier = row.realized_multiplier
+                row.unrealized_pnl_usd = 0.0
+                row.close_reason = "take_profit_50"
+                db.add(
+                    Stage17TailFill(
+                        position_id=int(row.id),
+                        fill_price=mark,
+                        fill_size_usd=0.0,
+                        fee_usd=0.0,
+                        fill_payload={"event": row.close_reason},
+                    )
+                )
+                closed += 1
+                continue
+            if float(mark) <= stop_loss_floor_mark:
+                shares = float(row.notional_usd) / float(row.entry_price)
+                pnl = (shares * float(mark)) - float(row.notional_usd)
+                row.status = "CLOSED"
+                row.closed_at = datetime.now(UTC)
+                row.realized_pnl_usd = pnl
+                row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
+                row.current_multiplier = row.realized_multiplier
+                row.unrealized_pnl_usd = 0.0
+                row.close_reason = "stop_loss_floor"
+                db.add(
+                    Stage17TailFill(
+                        position_id=int(row.id),
+                        fill_price=mark,
+                        fill_size_usd=0.0,
+                        fee_usd=0.0,
+                        fill_payload={"event": row.close_reason},
+                    )
+                )
+                closed += 1
+                continue
+            if row.resolution_deadline is not None:
+                dl = row.resolution_deadline if row.resolution_deadline.tzinfo else row.resolution_deadline.replace(tzinfo=UTC)
+                days_left = (dl - datetime.now(UTC)).total_seconds() / 86400.0
+                if days_left <= float(settings.signal_tail_days_before_resolution_exit):
+                    min_mark = float(row.entry_price) * float(settings.signal_tail_min_mark_to_hold_mult)
+                    if float(mark) < min_mark:
+                        shares = float(row.notional_usd) / float(row.entry_price)
+                        pnl = (shares * float(mark)) - float(row.notional_usd)
+                        row.status = "CLOSED"
+                        row.closed_at = datetime.now(UTC)
+                        row.realized_pnl_usd = pnl
+                        row.realized_multiplier = max(0.0, 1.0 + (pnl / float(row.notional_usd or 1.0)))
+                        row.current_multiplier = row.realized_multiplier
+                        row.unrealized_pnl_usd = 0.0
+                        row.close_reason = "deadline_exit"
+                        db.add(
+                            Stage17TailFill(
+                                position_id=int(row.id),
+                                fill_price=mark,
+                                fill_size_usd=0.0,
+                                fee_usd=0.0,
+                                fill_payload={"event": row.close_reason},
+                            )
+                        )
+                        closed += 1
+                        continue
         if not _is_market_resolved(market):
             continue
         outcome_yes = _resolved_yes(market)
@@ -324,6 +477,17 @@ def run_stage17_tail_cycle(
                 fill_payload={"event": row.close_reason, "outcome_yes": bool(outcome_yes)},
             )
         )
+        if won:
+            win_alerts.append(
+                {
+                    "position_id": int(row.id),
+                    "signal_id": int(row.signal_id) if row.signal_id is not None else None,
+                    "market_id": int(row.market_id),
+                    "title": str(market.title or ""),
+                    "koef": round(float(row.koef_entry or (1.0 / max(1e-6, float(row.entry_price or 0.5)))), 4),
+                    "profit_usd": round(float(pnl), 4),
+                }
+            )
         closed += 1
 
     db.commit()
@@ -333,4 +497,6 @@ def run_stage17_tail_cycle(
         "closed": closed,
         "skipped": skipped,
         "breaker_blocked": False,
+        "opened_alerts": opened_alerts,
+        "win_alerts": win_alerts,
     }

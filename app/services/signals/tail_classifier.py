@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import math
 import re
 from typing import Any
@@ -9,13 +10,6 @@ from app.models.models import Market
 
 
 _AMBIGUITY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bapproximately\b", re.IGNORECASE),
-    re.compile(r"\babout\b", re.IGNORECASE),
-    re.compile(r"\broughly\b", re.IGNORECASE),
-    re.compile(r"\bat least\b", re.IGNORECASE),
-    re.compile(r"\bup to\b", re.IGNORECASE),
-    re.compile(r"\bor more\b", re.IGNORECASE),
-    re.compile(r"\bor less\b", re.IGNORECASE),
     re.compile(r"\bsole discretion\b", re.IGNORECASE),
     re.compile(r"\bat our discretion\b", re.IGNORECASE),
     re.compile(r"\badmin(?:istrator)? decision\b", re.IGNORECASE),
@@ -24,10 +18,6 @@ _AMBIGUITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bteam decision\b", re.IGNORECASE),
     re.compile(r"\bsubjective\b", re.IGNORECASE),
     re.compile(r"\bsubject to\b", re.IGNORECASE),
-    re.compile(r"\bmay be\b", re.IGNORECASE),
-    re.compile(r"\bcould be\b", re.IGNORECASE),
-    re.compile(r"\bmight\b", re.IGNORECASE),
-    re.compile(r"\bpossibly\b", re.IGNORECASE),
     re.compile(r"\bif deemed\b", re.IGNORECASE),
     re.compile(r"\bif applicable\b", re.IGNORECASE),
     re.compile(r"\bin the event of\b", re.IGNORECASE),
@@ -40,39 +30,67 @@ _AMBIGUITY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _TAIL_CATEGORIES: dict[str, dict[str, Any]] = {
-    "natural_disaster": {
+    "price_target": {
         "keywords": (
-            "earthquake",
-            "hurricane",
-            "tornado",
-            "flood",
-            "tsunami",
-            "wildfire",
-            "volcano",
-            "typhoon",
-            "landslide",
+            "will bitcoin reach",
+            "will btc reach",
+            "will ethereum reach",
+            "will eth reach",
+            "will solana reach",
+            "will sol reach",
+            "price of bitcoin",
+            "price of ethereum",
+            "price of solana",
+            "exceed $",
+            "above $",
+            "hit $",
         ),
-        "strategy": "bet_no",
+        "strategy": "bet_yes_underpriced",
     },
     "crypto_level": {
-        "keywords": ("bitcoin above", "btc above", "eth above", "sol above", "reach $", "hit $", "below $"),
+        "keywords": ("bitcoin above", "btc above", "eth above", "sol above", "reach $", "hit $", "exceed $"),
+        "strategy": "bet_yes_underpriced",
+    },
+    "sports_match": {
+        "keywords": (
+            "win the championship",
+            "win the world series",
+            "win the super bowl",
+            "win the finals",
+            "game winner",
+            "match winner",
+            "tournament winner",
+        ),
+        "strategy": "bet_yes_underpriced",
+    },
+    "geopolitical_event": {
+        "keywords": (
+            "ceasefire",
+            "peace deal",
+            "invade",
+            "attack",
+            "sanction",
+            "resign",
+            "impeach",
+            "coup",
+            "summit",
+            "treaty",
+        ),
         "strategy": "llm_evaluate",
     },
-    "sports_outcome": {
-        "keywords": ("championship", "match", "game", "score", "final", "winner", "win by"),
-        "strategy": "llm_evaluate",
-    },
-    "political_stability": {
-        "keywords": ("resign", "impeach", "coup", "invasion", "war", "attack", "arrest", "assassination"),
-        "strategy": "bet_no",
+    "earnings_surprise": {
+        "keywords": (
+            "earnings",
+            "eps",
+            "revenue beat",
+            "guidance raise",
+            "quarterly report",
+        ),
+        "strategy": "bet_yes_underpriced",
     },
     "regulatory": {
-        "keywords": ("fda", "sec", "approve", "reject", "verdict", "ruling", "ban", "law"),
+        "keywords": ("fda", "sec", "approve", "reject", "verdict", "ruling", "ban", "law", "lawsuit"),
         "strategy": "llm_evaluate",
-    },
-    "zero_event": {
-        "keywords": ("exactly 0", "zero ", "none ", "will not", "won't happen", "without any"),
-        "strategy": "bet_yes",
     },
 }
 
@@ -101,6 +119,17 @@ def classify_tail_event(market: Market, *, settings: Settings) -> dict[str, Any]
         return None
     if prob < float(settings.signal_tail_min_prob) or prob > float(settings.signal_tail_max_prob):
         return None
+    vol = float(market.volume_24h or market.notional_value_dollars or market.liquidity_value or 0.0)
+    if vol < float(settings.signal_tail_min_volume_usd):
+        return None
+    rt = market.resolution_time
+    if rt is None:
+        return None
+    now = datetime.now(UTC)
+    ref = rt if rt.tzinfo else rt.replace(tzinfo=UTC)
+    days_to_res = max(0.0, (ref - now).total_seconds() / 86400.0)
+    if days_to_res <= 0.0 or days_to_res > float(settings.signal_tail_max_days_to_resolution):
+        return None
 
     ambiguity = resolution_ambiguity_flags(market)
     if ambiguity:
@@ -124,17 +153,14 @@ def classify_tail_event(market: Market, *, settings: Settings) -> dict[str, Any]
     if category is None:
         return None
 
-    direction = "TBD"
-    if strategy == "bet_no":
-        direction = "NO"
-    elif strategy == "bet_yes":
-        direction = "YES"
+    direction = "YES" if strategy in {"bet_yes_underpriced", "llm_evaluate"} else "NO"
 
     return {
         "eligible": True,
         "tail_category": category,
         "tail_strategy": strategy,
         "market_prob": prob,
+        "days_to_resolution": round(days_to_res, 4),
         "direction": direction,
         "reason_codes": [f"tail_category:{category}"],
     }

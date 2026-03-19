@@ -42,11 +42,7 @@ class BaseRateEstimator:
         if not math.isfinite(market_prob):
             market_prob = 0.5
         market_prob = min(0.999, max(0.001, market_prob))
-        if tail_category == "natural_disaster":
-            usgs = self._usgs_estimate()
-            if usgs is not None:
-                return usgs.to_dict()
-        if tail_category == "crypto_level":
+        if tail_category in {"crypto_level", "price_target"}:
             crypto = self._crypto_volatility_estimate(market)
             if crypto is not None:
                 return crypto.to_dict()
@@ -56,29 +52,23 @@ class BaseRateEstimator:
             return hist.to_dict()
 
         # deterministic fallback (no direct LLM call in stage17 foundation)
-        if strategy == "bet_no":
-            our = max(0.001, market_prob * 0.50)
-            return BaseRateEstimate(
-                our_prob=our,
-                confidence=0.35,
-                source="deterministic_fallback_bet_no",
-                reasoning="no_external_or_historical_signal",
-            ).to_dict()
-        if strategy == "bet_yes":
-            # Contrarian uplift for underestimated tail-yes scenarios.
-            # Using division by 0.6 gives stronger correction than linear +25%.
+        if strategy == "bet_yes_underpriced":
+            # Deterministic uplift prior for high-koef underpricing entries.
             our = min(0.99, max(0.001, market_prob / 0.60))
             return BaseRateEstimate(
                 our_prob=our,
                 confidence=0.35,
-                source="deterministic_fallback_bet_yes",
+                source="deterministic_fallback_bet_yes_underpriced",
                 reasoning="no_external_or_historical_signal",
             ).to_dict()
+        # llm_evaluate fallback: markets systematically overprice dramatic events,
+        # so apply a conservative 0.65x correction as prior until LLM runs.
+        our = max(0.001, market_prob * 0.65)
         return BaseRateEstimate(
-            our_prob=market_prob,
-            confidence=0.20,
-            source="deterministic_fallback_neutral",
-            reasoning="strategy_requires_tail_llm_stage_not_enabled",
+            our_prob=our,
+            confidence=0.25,
+            source="deterministic_fallback_llm_prior",
+            reasoning="llm_evaluate_pending_using_overpricing_prior",
         ).to_dict()
 
     @staticmethod
@@ -189,11 +179,13 @@ class BaseRateEstimator:
         vals: list[float] = []
         for m in rows:
             cat = str(m.category or "").lower()
-            if tail_category == "crypto_level" and "crypto" not in cat and "bitcoin" not in cat:
+            if tail_category in {"crypto_level", "price_target"} and "crypto" not in cat and "bitcoin" not in cat:
                 continue
-            if tail_category == "sports_outcome" and "sport" not in cat and "nba" not in cat and "nfl" not in cat:
+            if tail_category == "sports_match" and "sport" not in cat and "nba" not in cat and "nfl" not in cat:
                 continue
-            if tail_category == "political_stability" and "polit" not in cat and "election" not in cat:
+            if tail_category == "geopolitical_event" and "polit" not in cat and "election" not in cat:
+                continue
+            if tail_category == "earnings_surprise" and "earn" not in cat and "stock" not in cat and "finance" not in cat:
                 continue
             vals.append(float(m.probability_yes or 0.0))
             if len(vals) >= 200:

@@ -90,7 +90,7 @@ def test_tail_circuit_breaker_category_limit() -> None:
             direction="YES",
             status="OPEN",
             entry_price=0.02,
-            notional_usd=1.95,
+            notional_usd=19.95,
         )
     )
     db.commit()
