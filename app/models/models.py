@@ -575,6 +575,92 @@ class DryrunPosition(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Stage17TailPosition(Base):
+    __tablename__ = "stage17_tail_positions"
+    __table_args__ = (
+        Index("ix_stage17_tail_positions_status_opened", "status", "opened_at"),
+        Index("ix_stage17_tail_positions_category_status", "tail_category", "status"),
+        Index("ix_stage17_tail_positions_variation_status", "tail_variation", "status"),
+        Index("ix_stage17_tail_positions_market_status", "market_id", "status"),
+        Index("ix_stage17_tail_positions_signal_id", "signal_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False)
+    tail_category: Mapped[str] = mapped_column(String(50), nullable=False)
+    tail_variation: Mapped[str] = mapped_column(String(50), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    shares_count: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_rate_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mispricing_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    input_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    peak_mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    close_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Stage17TailFill(Base):
+    __tablename__ = "stage17_tail_fills"
+    __table_args__ = (
+        Index("ix_stage17_tail_fills_position_id", "position_id"),
+        Index("ix_stage17_tail_fills_filled_at", "filled_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    position_id: Mapped[int] = mapped_column(ForeignKey("stage17_tail_positions.id"), nullable=False)
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_size_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fill_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Stage17TailReport(Base):
+    __tablename__ = "stage17_tail_reports"
+    __table_args__ = (
+        Index("ix_stage17_tail_reports_report_date", "report_date"),
+        UniqueConstraint("report_date", name="uq_stage17_tail_reports_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False)
+    closed_positions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    win_rate_tail: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    payout_skew: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    payout_skew_ci_low_80: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    payout_skew_ci_high_80: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    top10pct_wins_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    time_to_resolution_median_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_win_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_concurrent_tail_positions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tail_budget_total_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    tail_budget_used_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    tail_budget_used_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    by_category: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    circuit_breaker_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    circuit_breaker_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acceptance: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SignalGenerationStats(Base):
     __tablename__ = "signal_generation_stats"
     __table_args__ = (

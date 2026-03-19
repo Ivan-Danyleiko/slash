@@ -151,6 +151,7 @@ from app.services.research.stage9_reports import (
     build_stage9_execution_realism_report,
 )
 from app.services.research.stage10_batch import build_stage10_batch_report
+from app.services.research.stage17_batch import build_stage17_batch_report
 from app.services.research.stage10_final_report import (
     build_stage10_final_report,
     extract_stage10_final_report_metrics,
@@ -166,6 +167,10 @@ from app.services.research.stage10_replay import (
 from app.services.research.stage10_timeline_quality import build_stage10_timeline_quality_report
 from app.services.research.stage10_timeline_backfill import build_stage10_timeline_backfill_plan
 from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
+from app.services.research.stage17_tail_report import (
+    build_stage17_tail_report,
+    extract_stage17_tail_report_metrics,
+)
 from app.services.stage11.reports import (
     build_stage11_execution_report,
     build_stage11_risk_report,
@@ -183,7 +188,7 @@ from app.services.stage11.order_manager import (
     get_order_detail,
     refresh_order_status,
 )
-from app.tasks.jobs import stage11_reconcile_job
+from app.tasks.jobs import stage11_reconcile_job, stage17_batch_job, stage17_cycle_job, stage17_track_job
 from app.services.research.stage7_final_report import (
     build_stage7_final_report,
     extract_stage7_final_report_metrics,
@@ -3231,6 +3236,87 @@ def research_stage11_runtime_mode(
         "to_mode": str(client.runtime_mode),
         "reason_code": code,
     }
+
+
+@router.get("/research/stage17/tail-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
+def research_stage17_tail_report(
+    days: int = Query(default=60, ge=7, le=365),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    cache_key = f"stage17:tail_report:{days}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage17_tail_report(
+            db,
+            settings=settings,
+            days=days,
+            persist=True,
+        ),
+    )
+
+
+@router.post("/research/stage17/tail-report/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
+def research_stage17_tail_report_track(
+    run_name: str = Query(default="stage17_tail_report"),
+    days: int = Query(default=60, ge=7, le=365),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    report = build_stage17_tail_report(db, settings=settings, days=days, persist=True)
+    tracking = record_stage5_experiment(
+        run_name=run_name,
+        params={"report_type": "stage17_tail_report", "days": days},
+        metrics=extract_stage17_tail_report_metrics(report),
+        tags={"stage": "stage17", "final_decision": str(report.get("final_decision") or "")},
+    )
+    return {"report": report, "tracking": tracking}
+
+
+@router.post("/research/stage17/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
+def research_stage17_track(
+    days: int = Query(default=60, ge=7, le=365),
+    db: Session = Depends(get_db),
+) -> dict:
+    return stage17_track_job(db, days=days)
+
+
+@router.post("/research/stage17/cycle", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
+def research_stage17_cycle(
+    limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    return stage17_cycle_job(db, limit=limit)
+
+
+@router.get("/research/stage17/batch", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])
+def research_stage17_batch(
+    days: int = Query(default=60, ge=7, le=365),
+    cycle_limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    cache_key = f"stage17:batch:{days}:{cycle_limit}"
+    return _cached_heavy_get(
+        key=cache_key,
+        ttl_sec=int(settings.admin_heavy_get_cache_ttl_sec),
+        builder=lambda: build_stage17_batch_report(
+            db,
+            settings=settings,
+            days=days,
+            cycle_limit=cycle_limit,
+        ),
+    )
+
+
+@router.post("/research/stage17/batch/track", dependencies=[Depends(require_admin), Depends(require_admin_write_throttle)])
+def research_stage17_batch_track(
+    days: int = Query(default=60, ge=7, le=365),
+    cycle_limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    return stage17_batch_job(db, days=days, cycle_limit=cycle_limit)
 
 
 @router.get("/research/stage7/final-report", dependencies=[Depends(require_admin), Depends(require_admin_read_throttle)])

@@ -17,6 +17,9 @@ from app.tasks.jobs import (
     stage10_timeline_backfill_job,
     stage11_track_job,
     stage11_reconcile_job,
+    stage17_batch_job,
+    stage17_cycle_job,
+    stage17_track_job,
     stage7_evaluate_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
@@ -265,6 +268,33 @@ def stage11_reconcile_task() -> dict:
         db.close()
 
 
+@celery_app.task(name="stage17_track", **_RETRY)
+def stage17_track_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage17_track_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage17_cycle", **_RETRY)
+def stage17_cycle_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage17_cycle_job(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stage17_batch", **_RETRY)
+def stage17_batch_task() -> dict:
+    db = SessionLocal()
+    try:
+        return stage17_batch_job(db)
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Beat schedule
 # ---------------------------------------------------------------------------
@@ -366,5 +396,17 @@ celery_app.conf.beat_schedule = {
     "stage11-track-daily": {
         "task": "stage11_track",
         "schedule": crontab(hour=3, minute=25),
+    },
+    "stage17-track-every-6h": {
+        "task": "stage17_track",
+        "schedule": crontab(hour="*/6", minute=35),
+    },
+    "stage17-batch-daily": {
+        "task": "stage17_batch",
+        "schedule": crontab(hour=3, minute=40),
+    },
+    "stage17-cycle-every-30-min": {
+        "task": "stage17_cycle",
+        "schedule": crontab(minute="20,50"),
     },
 }

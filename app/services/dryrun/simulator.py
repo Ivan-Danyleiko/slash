@@ -30,6 +30,7 @@ from app.models.models import (
 from app.services.dryrun.kelly import kelly_fraction, portfolio_kelly_adjustment
 from app.services.dryrun.scorer import composite_score
 from app.services.dryrun.cross_platform import build_cross_platform_prob_map, get_cross_platform_prob
+from app.services.stage17.tail_executor import run_stage17_tail_cycle
 from app.utils.http import retry_request
 
 logger = logging.getLogger(__name__)
@@ -604,6 +605,12 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
     opened = 0
     skipped = 0
     reasons: list[str] = []
+    tail_result = run_stage17_tail_cycle(
+        db,
+        settings=get_settings(),
+        limit=max(1, int(get_settings().signal_tail_max_candidates)),
+        open_new=True,
+    )
     scan = _scan_signal_candidates(db)
     accepted_scored = list(scan.get("accepted") or [])
     if not accepted_scored:
@@ -612,6 +619,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             "skipped": len(scan.get("hard_rejected") or []) + len(scan.get("soft_rejected") or []),
             "cash_remaining_usd": round(portfolio.current_cash_usd, 4),
             "skip_reasons": ["no_candidates_after_scoring"],
+            "tail": tail_result,
         }
     portfolio = _lock_portfolio(db)
     by_signal_id = dict(scan.get("row_map") or {})
@@ -767,6 +775,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         "skipped": skipped,
         "cash_remaining_usd": round(portfolio.current_cash_usd, 4),
         "skip_reasons": reasons[:10],
+        "tail": tail_result,
     }
 
 
@@ -921,6 +930,12 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
     portfolio.updated_at = now
     db.flush()
 
+    tail_result = run_stage17_tail_cycle(
+        db,
+        settings=get_settings(),
+        limit=0,
+        open_new=False,
+    )
     return {
         "prices_updated": updated,
         "stop_loss_partial": stop_loss_partial,
@@ -929,6 +944,7 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
         "time_exit_closed": time_exit_closed,
         "expired_closed": expired_closed,
         "total_unrealized_usd": round(total_unrealized, 4),
+        "tail": tail_result,
     }
 
 
@@ -1004,4 +1020,10 @@ def check_resolutions(db: Session) -> dict[str, Any]:
         resolved_count += 1
 
     db.flush()
-    return {"resolved_closed": resolved_count}
+    tail_result = run_stage17_tail_cycle(
+        db,
+        settings=get_settings(),
+        limit=0,
+        open_new=False,
+    )
+    return {"resolved_closed": resolved_count, "tail": tail_result}

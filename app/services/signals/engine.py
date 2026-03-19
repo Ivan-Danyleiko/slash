@@ -27,7 +27,10 @@ from app.services.analyzers.duplicate import DuplicateDetector
 from app.services.analyzers.liquidity import LiquidityAnalyzer
 from app.services.analyzers.rules_risk import RulesRiskAnalyzer
 from app.services.analyzers.weird_market import WeirdMarketDetector
+from app.services.signals.base_rate import BaseRateEstimator
 from app.services.signals.execution import build_execution_simulator
+from app.services.signals.tail_circuit_breaker import can_open_tail_by_category, check_tail_circuit_breaker
+from app.services.signals.tail_classifier import classify_tail_event, tail_mispricing_ratio
 
 
 class SignalEngine:
@@ -313,6 +316,16 @@ class SignalEngine:
         arbitrage_excluded_by_keyword = 0
         arbitrage_low_volume_skipped = 0
         arbitrage_personal_market_skipped = 0
+        tail_attempted = 0
+        tail_created = 0
+        tail_updated = 0
+        tail_out_of_prob_range = 0
+        tail_ambiguous_skipped = 0
+        tail_below_mispricing = 0
+        tail_by_category_limit = 0
+        tail_breaker_blocked = 0
+        tail_excluded_by_keyword = 0
+        tail_source_filtered = 0
 
         pairs = list(self.db.scalars(select(DuplicateMarketPair)))
         liquidity_rows = list(self.db.scalars(select(LiquidityAnalysis)))
@@ -696,6 +709,26 @@ class SignalEngine:
                 created += 1
                 arbitrage_created += 1
 
+        tail_stats = self._generate_tail_signals(
+            liquidity_by_market=liquidity_by_market,
+            rules_by_market=rules_by_market,
+            excluded_tokens=excluded_tokens,
+            enabled_sources=enabled_sources,
+            known_signal_sources=known_signal_sources,
+            platform_by_id=platform_by_id,
+        )
+        created += int(tail_stats.get("tail_created", 0))
+        tail_attempted = int(tail_stats.get("tail_attempted", 0))
+        tail_created = int(tail_stats.get("tail_created", 0))
+        tail_updated = int(tail_stats.get("tail_updated", 0))
+        tail_out_of_prob_range = int(tail_stats.get("tail_out_of_prob_range", 0))
+        tail_ambiguous_skipped = int(tail_stats.get("tail_ambiguous_skipped", 0))
+        tail_below_mispricing = int(tail_stats.get("tail_below_mispricing", 0))
+        tail_by_category_limit = int(tail_stats.get("tail_by_category_limit", 0))
+        tail_breaker_blocked = int(tail_stats.get("tail_breaker_blocked", 0))
+        tail_excluded_by_keyword = int(tail_stats.get("tail_excluded_by_keyword", 0))
+        tail_source_filtered = int(tail_stats.get("tail_source_filtered", 0))
+
         self.db.commit()
         return {
             "signals_created": created,
@@ -730,6 +763,16 @@ class SignalEngine:
                 "arbitrage_excluded_by_keyword": arbitrage_excluded_by_keyword,
                 "arbitrage_low_volume_skipped": arbitrage_low_volume_skipped,
                 "arbitrage_personal_market_skipped": arbitrage_personal_market_skipped,
+                "tail_attempted": tail_attempted,
+                "tail_created": tail_created,
+                "tail_updated": tail_updated,
+                "tail_out_of_prob_range": tail_out_of_prob_range,
+                "tail_ambiguous_skipped": tail_ambiguous_skipped,
+                "tail_below_mispricing": tail_below_mispricing,
+                "tail_by_category_limit": tail_by_category_limit,
+                "tail_breaker_blocked": tail_breaker_blocked,
+                "tail_excluded_by_keyword": tail_excluded_by_keyword,
+                "tail_source_filtered": tail_source_filtered,
             },
         }
 
@@ -1323,6 +1366,218 @@ class SignalEngine:
             "skipped_too_large_diff": skipped_too_large_diff,
         }
 
+    def _generate_tail_signals(
+        self,
+        *,
+        liquidity_by_market: dict[int, float],
+        rules_by_market: dict[int, float],
+        excluded_tokens: list[str],
+        enabled_sources: set[str],
+        known_signal_sources: set[str],
+        platform_by_id: dict[int, str],
+    ) -> dict[str, int]:
+        if not bool(self.settings.signal_tail_enabled):
+            return {
+                "tail_attempted": 0,
+                "tail_created": 0,
+                "tail_updated": 0,
+                "tail_out_of_prob_range": 0,
+                "tail_ambiguous_skipped": 0,
+                "tail_below_mispricing": 0,
+                "tail_by_category_limit": 0,
+                "tail_breaker_blocked": 0,
+                "tail_excluded_by_keyword": 0,
+                "tail_source_filtered": 0,
+            }
+
+        created = 0
+        updated = 0
+        attempted = 0
+        out_of_prob_range = 0
+        ambiguous_skipped = 0
+        below_mispricing = 0
+        by_category_limit = 0
+        breaker_blocked = 0
+        excluded_by_keyword = 0
+        source_filtered = 0
+        unknown_category_skipped = 0
+        max_candidates = max(1, int(self.settings.signal_tail_max_candidates))
+        min_mispricing = max(0.0, float(self.settings.signal_tail_min_mispricing_ratio))
+        ref_balance = max(1.0, float(self.settings.signal_tail_reference_balance_usd))
+        raw_notional = ref_balance * max(0.0, float(self.settings.signal_tail_notional_pct))
+        # Hard risk cap: single tail position cannot exceed 5% reference balance.
+        notional_usd = min(max(0.05, raw_notional), ref_balance * 0.05)
+
+        blocked, _reason = check_tail_circuit_breaker(
+            self.db,
+            settings=self.settings,
+            balance_usd=ref_balance,
+            api_status={"degraded": False},
+        )
+        if blocked:
+            return {
+                "tail_attempted": 0,
+                "tail_created": 0,
+                "tail_updated": 0,
+                "tail_out_of_prob_range": 0,
+                "tail_ambiguous_skipped": 0,
+                "tail_below_mispricing": 0,
+                "tail_by_category_limit": 0,
+                "tail_breaker_blocked": max_candidates,
+                "tail_excluded_by_keyword": 0,
+                "tail_source_filtered": 0,
+            }
+
+        estimator = BaseRateEstimator(db=self.db, settings=self.settings)
+        tail_markets = list(
+            self.db.scalars(
+                select(Market)
+                .where(Market.probability_yes.is_not(None))
+                .order_by(Market.probability_yes.asc(), Market.fetched_at.desc())
+                .limit(max_candidates * 20)
+            )
+        )
+
+        for market in tail_markets:
+            if created >= max_candidates:
+                break
+            attempted += 1
+
+            title_l = (market.title or "").lower()
+            if any(token in title_l for token in excluded_tokens):
+                excluded_by_keyword += 1
+                continue
+
+            platform_name = str(
+                (market.source_payload or {}).get("platform") or platform_by_id.get(market.platform_id) or ""
+            ).upper()
+            if enabled_sources and platform_name in known_signal_sources and platform_name not in enabled_sources:
+                source_filtered += 1
+                continue
+
+            tail = classify_tail_event(market, settings=self.settings)
+            if tail is None:
+                out_of_prob_range += 1
+                continue
+            if not bool(tail.get("eligible")):
+                ambiguous_skipped += 1
+                continue
+
+            tail_category = str(tail.get("tail_category") or "unknown")
+            tail_strategy = str(tail.get("tail_strategy") or "unknown")
+            if tail_category not in {
+                "crypto",
+                "crypto_level",
+                "natural_disaster",
+                "political_stability",
+                "sports_outcome",
+                "regulatory",
+                "zero_event",
+            }:
+                unknown_category_skipped += 1
+                continue
+            base_rate = estimator.estimate(market, tail_category=tail_category, strategy=tail_strategy)
+            market_prob = float(tail.get("market_prob") or market.probability_yes or 0.5)
+            our_prob = float(base_rate.get("our_prob") or market_prob)
+            mispricing_ratio = tail_mispricing_ratio(market_prob=market_prob, our_prob=our_prob)
+            if mispricing_ratio < min_mispricing:
+                below_mispricing += 1
+                continue
+
+            allowed, _cat_reason = can_open_tail_by_category(
+                self.db,
+                settings=self.settings,
+                category=tail_category,
+                notional_usd=notional_usd,
+                balance_usd=ref_balance,
+            )
+            if not allowed:
+                by_category_limit += 1
+                continue
+
+            signal_direction = str(tail.get("direction") or "TBD").upper()
+            if signal_direction not in ("YES", "NO"):
+                signal_direction = "YES" if our_prob >= market_prob else "NO"
+            source_name = str(base_rate.get("source") or "")
+            if source_name.startswith("external_") or source_name.startswith("historical_"):
+                tail_variation = "tail_base_rate"
+            elif tail_strategy == "llm_evaluate":
+                tail_variation = "tail_narrative_fade"
+            else:
+                tail_variation = "tail_stability"
+
+            liq_score = float(liquidity_by_market.get(market.id, 0.0) or 0.0)
+            rr_score = float(rules_by_market.get(market.id, 0.0) or 0.0)
+            score_breakdown = self._score_breakdown(
+                edge=min(1.0, mispricing_ratio / 5.0),
+                liquidity=liq_score,
+                freshness=max(0.0, 1 - (self._hours_since(market.fetched_at) / 24.0)),
+                confidence=float(base_rate.get("confidence") or 0.0),
+                risk_penalties=min(1.0, rr_score * 0.5),
+            )
+            metadata = {
+                "signal_mode": tail_variation,
+                "tail_category": tail_category,
+                "tail_strategy": tail_strategy,
+                "tail_market_prob": round(market_prob, 6),
+                "tail_our_prob": round(our_prob, 6),
+                "tail_mispricing_ratio": round(mispricing_ratio, 6),
+                "tail_base_rate_source": source_name,
+                "tail_base_rate_reasoning": str(base_rate.get("reasoning") or ""),
+                "tail_direction_rule": "deterministic",
+                "reason_codes": [
+                    *(tail.get("reason_codes") or []),
+                    f"tail_variation:{tail_variation}",
+                    f"tail_source:{source_name}",
+                ],
+            }
+            outcome = self._create_signal_if_not_recent(
+                signal_type=SignalType.TAIL_EVENT_CANDIDATE,
+                market_id=market.id,
+                related_market_id=None,
+                title=f"Tail event candidate: {market.title}",
+                summary=(
+                    f"tail_category={tail_category}; strategy={tail_strategy}; "
+                    f"market_prob={market_prob:.4f}; our_prob={our_prob:.4f}; "
+                    f"mispricing_ratio={mispricing_ratio:.2f}"
+                ),
+                confidence_score=float(base_rate.get("confidence") or 0.0),
+                liquidity_score=liq_score,
+                rules_risk_score=rr_score,
+                divergence_score=mispricing_ratio,
+                signal_mode=tail_variation,
+                score_breakdown_json=score_breakdown,
+                execution_analysis=self.execution.simulate(
+                    market=market,
+                    confidence_score=float(base_rate.get("confidence") or 0.0),
+                    liquidity_score=liq_score,
+                    recent_move=None,
+                    signal_type=SignalType.TAIL_EVENT_CANDIDATE,
+                ),
+                signal_direction=signal_direction,
+                metadata_json=metadata,
+            )
+            if outcome == "created":
+                created += 1
+            elif outcome == "updated":
+                updated += 1
+            else:
+                breaker_blocked += 1
+
+        return {
+            "tail_attempted": attempted,
+            "tail_created": created,
+            "tail_updated": updated,
+            "tail_out_of_prob_range": out_of_prob_range,
+            "tail_ambiguous_skipped": ambiguous_skipped,
+            "tail_below_mispricing": below_mispricing,
+            "tail_by_category_limit": by_category_limit,
+            "tail_breaker_blocked": breaker_blocked,
+            "tail_excluded_by_keyword": excluded_by_keyword,
+            "tail_source_filtered": source_filtered,
+            "tail_unknown_category_skipped": unknown_category_skipped,
+        }
+
     def _create_signal_if_not_recent(
         self,
         *,
@@ -1433,7 +1688,8 @@ class SignalEngine:
     def _hours_since(ts: datetime | None) -> float:
         if ts is None:
             return 24.0
-        return max(0.0, (datetime.now(UTC) - ts).total_seconds() / 3600.0)
+        ref = ts.astimezone(UTC) if ts.tzinfo else ts.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - ref).total_seconds() / 3600.0)
 
     @staticmethod
     def _score_breakdown(

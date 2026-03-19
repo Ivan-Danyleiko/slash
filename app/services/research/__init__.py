@@ -127,6 +127,12 @@ from app.services.research.stage10_timeline_backfill import (
     extract_stage10_timeline_backfill_metrics,
 )
 from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
+from app.services.research.stage17_batch import build_stage17_batch_report
+from app.services.research.stage17_tail_report import (
+    build_stage17_tail_report,
+    extract_stage17_tail_report_metrics,
+    payout_skew_bootstrap_ci,
+)
 from app.services.research.stage9_reports import (
     build_stage9_consensus_quality_report,
     build_stage9_directional_labeling_report,
@@ -221,6 +227,10 @@ __all__ = [
     "build_stage10_timeline_backfill_plan",
     "extract_stage10_timeline_backfill_metrics",
     "run_stage10_timeline_backfill",
+    "build_stage17_batch_report",
+    "build_stage17_tail_report",
+    "extract_stage17_tail_report_metrics",
+    "payout_skew_bootstrap_ci",
     "build_stage7_final_report",
     "extract_stage7_final_report_metrics",
     "get_ab_variant_for_user",

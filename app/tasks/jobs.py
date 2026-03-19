@@ -32,9 +32,15 @@ from app.services.research.stage8_final_report import (
 from app.services.research.stage9_batch import build_stage9_batch_report
 from app.services.research.stage10_batch import build_stage10_batch_report
 from app.services.research.stage10_timeline_backfill_run import run_stage10_timeline_backfill
+from app.services.research.stage17_batch import build_stage17_batch_report
+from app.services.research.stage17_tail_report import (
+    build_stage17_tail_report,
+    extract_stage17_tail_report_metrics,
+)
 from app.services.research.signal_history_labeler import label_signal_history_from_snapshots
 from app.services.stage11.reports import build_stage11_track_report
 from app.services.stage11.order_manager import reconcile_orders
+from app.services.stage17.tail_executor import run_stage17_tail_cycle
 from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
@@ -715,6 +721,86 @@ def stage11_reconcile_job(
                 "filled": int(report.get("filled") or 0),
                 "safe_cancelled": int(report.get("safe_cancelled") or 0),
                 "still_unknown": int(report.get("still_unknown") or 0),
+            },
+        )
+        return {"status": "ok", "result": report}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
+def stage17_track_job(
+    db: Session,
+    *,
+    days: int = 60,
+) -> dict:
+    job = _start_job(db, "stage17_track")
+    try:
+        settings = get_settings()
+        report = build_stage17_tail_report(db, settings=settings, days=days, persist=True)
+        tracking = record_stage5_experiment(
+            run_name="stage17_tail_report",
+            params={"report_type": "stage17_tail_report", "days": days},
+            metrics=extract_stage17_tail_report_metrics(report),
+            tags={"stage": "stage17", "final_decision": str(report.get("final_decision") or "")},
+        )
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "final_decision": str(report.get("final_decision") or ""),
+                "closed_positions": int((report.get("summary") or {}).get("closed_positions") or 0),
+                "payout_skew_ci_low_80": float((report.get("summary") or {}).get("payout_skew_ci_low_80") or 0.0),
+                "tracking_recorded": bool(tracking.get("recorded")),
+            },
+        )
+        return {"status": "ok", "result": report, "tracking": tracking}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
+def stage17_cycle_job(
+    db: Session,
+    *,
+    limit: int = 20,
+) -> dict:
+    job = _start_job(db, "stage17_cycle")
+    try:
+        settings = get_settings()
+        result = run_stage17_tail_cycle(db, settings=settings, limit=limit)
+        _finish_job(db, job, "SUCCESS", result)
+        return {"status": "ok", "result": result}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
+def stage17_batch_job(
+    db: Session,
+    *,
+    days: int = 60,
+    cycle_limit: int = 20,
+) -> dict:
+    job = _start_job(db, "stage17_batch")
+    try:
+        settings = get_settings()
+        report = build_stage17_batch_report(
+            db,
+            settings=settings,
+            days=days,
+            cycle_limit=cycle_limit,
+        )
+        summary = ((report.get("reports") or {}).get("stage17_tail_report") or {}).get("summary") or {}
+        _finish_job(
+            db,
+            job,
+            "SUCCESS",
+            {
+                "final_decision": str(((report.get("reports") or {}).get("stage17_tail_report") or {}).get("final_decision") or ""),
+                "closed_positions": int(summary.get("closed_positions") or 0),
+                "payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
             },
         )
         return {"status": "ok", "result": report}

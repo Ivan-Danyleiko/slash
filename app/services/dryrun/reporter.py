@@ -9,13 +9,13 @@ Builds a structured report with:
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.models import DryrunPortfolio, DryrunPosition, Market, Signal
+from app.models.models import DryrunPortfolio, DryrunPosition, Market, Signal, Stage17TailPosition
 from app.services.dryrun.simulator import get_or_create_portfolio
 
 
@@ -110,6 +110,48 @@ def get_portfolio_snapshot(db: Session) -> dict[str, Any]:
         "open_positions_pct": round(open_pct, 4),
         "category_breakdown": category_breakdown,
         "bucket_breakdown_pct": bucket_breakdown_pct,
+    }
+
+
+def build_tail_report(db: Session, *, days: int = 60) -> dict[str, Any]:
+    """Tail-specific lightweight report for dryrun endpoint (no research package imports)."""
+    cutoff = datetime.now(UTC) - timedelta(days=max(1, int(days)))
+    rows = list(
+        db.scalars(
+            select(Stage17TailPosition)
+            .where(Stage17TailPosition.opened_at >= cutoff)
+            .order_by(Stage17TailPosition.opened_at.desc())
+        )
+    )
+    closed = [r for r in rows if str(r.status or "").upper() == "CLOSED"]
+    wins = [r for r in closed if float(r.realized_pnl_usd or 0.0) > 0.0]
+    losses = [r for r in closed if float(r.realized_pnl_usd or 0.0) <= 0.0]
+    hit_rate = (len(wins) / len(closed)) if closed else 0.0
+    by_variation: dict[str, dict[str, float]] = {}
+    for r in closed:
+        key = str(r.tail_variation or "unknown")
+        b = by_variation.setdefault(key, {"closed": 0.0, "wins": 0.0, "pnl_usd": 0.0})
+        b["closed"] += 1.0
+        p = float(r.realized_pnl_usd or 0.0)
+        if p > 0:
+            b["wins"] += 1.0
+        b["pnl_usd"] += p
+    for _, b in by_variation.items():
+        c = float(b.get("closed") or 0.0)
+        b["win_rate_tail"] = (float(b.get("wins") or 0.0) / c) if c > 0 else 0.0
+    final_decision = "NO_GO_DATA_PENDING" if len(closed) < 40 else "LIMITED_GO" if hit_rate >= 0.60 else "NO_GO"
+    return {
+        "summary": {
+            "days": int(days),
+            "rows_total": len(rows),
+            "closed_positions": len(closed),
+            "open_positions": len([r for r in rows if str(r.status or "").upper() == "OPEN"]),
+            "hit_rate_tail": round(hit_rate, 6),
+            "wins": len(wins),
+            "losses": len(losses),
+        },
+        "by_variation": by_variation,
+        "final_decision": final_decision,
     }
 
 
@@ -247,6 +289,7 @@ def build_report(db: Session) -> dict[str, Any]:
         "portfolio": portfolio_out,
         "stats": stats,
         "positions": positions_out,
+        "tail_report": build_tail_report(db, days=60),
         "ai_summary": _ai_summary(portfolio, stats, len(open_positions), n_closed),
         "generated_at": datetime.now(UTC).isoformat(),
     }
