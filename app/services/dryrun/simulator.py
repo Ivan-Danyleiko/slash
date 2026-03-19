@@ -306,7 +306,8 @@ def _resolve_trade_direction(signal: Signal) -> str:
     direction = str(signal.signal_direction or "YES").upper()
     if direction not in ("YES", "NO"):
         direction = "YES"
-    if str(signal.signal_mode or "").lower() == "momentum":
+    mode = str(signal.signal_mode or "").lower()
+    if mode in ("momentum", "uncertainty_liquid"):
         direction = "NO" if direction == "YES" else "YES"
     return direction
 
@@ -444,13 +445,6 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
     for signal, s7, market in rows:
         if market.id in open_market_ids:
             duplicates += 1
-            continue
-
-        signal_mode = str(signal.signal_mode or "").lower()
-        if signal_mode == "uncertainty_liquid":
-            hard_rejected.append(
-                {"signal_id": signal.id, "title": market.title[:60], "reason": "uncertainty_liquid_disabled"}
-            )
             continue
 
         direction = _resolve_trade_direction(signal)
