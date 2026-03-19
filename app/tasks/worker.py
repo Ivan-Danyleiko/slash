@@ -56,243 +56,46 @@ def _db_task(job_fn):
     return wrapper
 
 
+def _register_db_task(task_name: str, job_fn):
+    task_obj = celery_app.task(name=task_name, **_RETRY)(_db_task(job_fn))
+    globals()[f"{task_name}_task"] = task_obj
+    return task_obj
+
+
 # ---------------------------------------------------------------------------
-# Task definitions
+# Task definitions (registered dynamically)
 # ---------------------------------------------------------------------------
+_TASK_JOB_MAP = {
+    "sync_all_platforms": sync_all_platforms_job,
+    "analyze_markets": analyze_markets_job,
+    "detect_duplicates": detect_duplicates_job,
+    "analyze_rules": analyze_rules_job,
+    "detect_divergence": detect_divergence_job,
+    "generate_signals": generate_signals_job,
+    "daily_digest": daily_digest_job,
+    "signal_push": signal_push_job,
+    "cleanup_old_signals": cleanup_old_signals_job,
+    "update_watchlists": update_watchlists_job,
+    "quality_snapshot": quality_snapshot_job,
+    "label_signal_history": label_signal_history_job,
+    "label_signal_history_resolution": label_signal_history_resolution_job,
+    "cleanup_signal_history": cleanup_signal_history_job,
+    "provider_contract_checks": provider_contract_checks_job,
+    "stage7_evaluate": stage7_evaluate_job,
+    "stage8_shadow_ledger": stage8_shadow_ledger_job,
+    "stage8_final_report": stage8_final_report_job,
+    "stage9_track": stage9_track_job,
+    "stage10_track": stage10_track_job,
+    "stage10_timeline_backfill": stage10_timeline_backfill_job,
+    "stage11_track": stage11_track_job,
+    "stage11_reconcile": stage11_reconcile_job,
+    "stage17_track": stage17_track_job,
+    "stage17_cycle": stage17_cycle_job,
+    "stage17_batch": stage17_batch_job,
+}
 
-@celery_app.task(name="sync_all_platforms", **_RETRY)
-def sync_all_platforms_task() -> dict:
-    db = SessionLocal()
-    try:
-        return sync_all_platforms_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="analyze_markets", **_RETRY)
-def analyze_markets_task() -> dict:
-    db = SessionLocal()
-    try:
-        return analyze_markets_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="detect_duplicates", **_RETRY)
-def detect_duplicates_task() -> dict:
-    db = SessionLocal()
-    try:
-        return detect_duplicates_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="analyze_rules", **_RETRY)
-def analyze_rules_task() -> dict:
-    db = SessionLocal()
-    try:
-        return analyze_rules_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="detect_divergence", **_RETRY)
-def detect_divergence_task() -> dict:
-    db = SessionLocal()
-    try:
-        return detect_divergence_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="generate_signals", **_RETRY)
-def generate_signals_task() -> dict:
-    db = SessionLocal()
-    try:
-        return generate_signals_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="daily_digest", **_RETRY)
-def daily_digest_task() -> dict:
-    db = SessionLocal()
-    try:
-        return daily_digest_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="signal_push", **_RETRY)
-def signal_push_task() -> dict:
-    db = SessionLocal()
-    try:
-        return signal_push_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="cleanup_old_signals", **_RETRY)
-def cleanup_old_signals_task() -> dict:
-    db = SessionLocal()
-    try:
-        return cleanup_old_signals_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="update_watchlists", **_RETRY)
-def update_watchlists_task() -> dict:
-    db = SessionLocal()
-    try:
-        return update_watchlists_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="quality_snapshot", **_RETRY)
-def quality_snapshot_task() -> dict:
-    db = SessionLocal()
-    try:
-        return quality_snapshot_job(db)
-    finally:
-        db.close()
-
-
-# Labeling: single batched task covers all horizons (15m/30m/1h/6h/24h)
-@celery_app.task(name="label_signal_history", **_RETRY)
-def label_signal_history_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="label_signal_history_resolution", **_RETRY)
-def label_signal_history_resolution_task() -> dict:
-    db = SessionLocal()
-    try:
-        return label_signal_history_resolution_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="cleanup_signal_history", **_RETRY)
-def cleanup_signal_history_task() -> dict:
-    db = SessionLocal()
-    try:
-        return cleanup_signal_history_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="provider_contract_checks", **_RETRY)
-def provider_contract_checks_task() -> dict:
-    db = SessionLocal()
-    try:
-        return provider_contract_checks_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage7_evaluate", **_RETRY)
-def stage7_evaluate_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage7_evaluate_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage8_shadow_ledger", **_RETRY)
-def stage8_shadow_ledger_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage8_shadow_ledger_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage8_final_report", **_RETRY)
-def stage8_final_report_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage8_final_report_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage9_track", **_RETRY)
-def stage9_track_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage9_track_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage10_track", **_RETRY)
-def stage10_track_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage10_track_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage10_timeline_backfill", **_RETRY)
-def stage10_timeline_backfill_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage10_timeline_backfill_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage11_track", **_RETRY)
-def stage11_track_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage11_track_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage11_reconcile", **_RETRY)
-def stage11_reconcile_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage11_reconcile_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage17_track", **_RETRY)
-def stage17_track_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage17_track_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage17_cycle", **_RETRY)
-def stage17_cycle_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage17_cycle_job(db)
-    finally:
-        db.close()
-
-
-@celery_app.task(name="stage17_batch", **_RETRY)
-def stage17_batch_task() -> dict:
-    db = SessionLocal()
-    try:
-        return stage17_batch_job(db)
-    finally:
-        db.close()
+for _task_name, _job_fn in _TASK_JOB_MAP.items():
+    _register_db_task(_task_name, _job_fn)
 
 
 # ---------------------------------------------------------------------------

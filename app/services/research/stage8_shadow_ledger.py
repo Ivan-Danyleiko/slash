@@ -26,15 +26,6 @@ _DATA_SUFFICIENCY_CACHE_TTL_SECONDS = 300
 _DATA_SUFFICIENCY_CACHE: dict[str, tuple[datetime, dict[str, Any]]] = {}
 
 
-def _latest_stage7_decision(db: Session, signal_id: int) -> Stage7AgentDecision | None:
-    return db.scalar(
-        select(Stage7AgentDecision)
-        .where(Stage7AgentDecision.signal_id == signal_id)
-        .order_by(Stage7AgentDecision.id.desc())
-        .limit(1)
-    )
-
-
 def _latest_stage7_decision_map(db: Session, signal_ids: list[int]) -> dict[int, Stage7AgentDecision]:
     if not signal_ids:
         return {}
@@ -306,6 +297,109 @@ def _precision_false_keep(rows: list[dict[str, Any]], resolved: dict[int, bool])
     return (round(precision, 6), round(1.0 - precision, 6))
 
 
+def _build_stage8_payload_for_signal(
+    *,
+    signal: Signal,
+    market: Market,
+    platform: Platform,
+    stage7: Stage7AgentDecision | None,
+    profile: dict[str, dict[str, float]],
+    settings: Settings,
+    data_sufficient: bool,
+) -> tuple[dict[str, Any], bool]:
+    if not stage7:
+        missing_stage7 = True
+        base_decision = "SKIP"
+        evidence_bundle: dict[str, Any] = {}
+    else:
+        missing_stage7 = False
+        base_decision = stage7.decision
+        evidence_bundle = dict(stage7.evidence_bundle or {})
+
+    category_result = classify_market_category(
+        market,
+        confidence_floor=float(settings.stage8_category_confidence_floor),
+    )
+    category_policy = get_category_policy(category_result.category, profile)
+
+    internal_gate = evaluate_internal_gate_v2(
+        signal=signal,
+        market=market,
+        category_policy=category_policy,
+    )
+    rules_result = evaluate_rules_fields(
+        market,
+        platform=platform,
+        category_policy=category_policy,
+    )
+    context_result = route_external_context(
+        evidence_bundle,
+        max_contradiction=float(category_policy.get("max_cross_platform_contradiction", 1.0)),
+    )
+
+    reason_codes: list[str] = []
+    reason_codes.extend(category_result.reason_codes)
+    reason_codes.extend(internal_gate.reason_codes)
+    reason_codes.extend(rules_result.reason_codes)
+    reason_codes.extend(context_result.reason_codes)
+
+    soft_reasons = _soft_gate_reason_codes(
+        signal=signal,
+        market=market,
+        category_policy=category_policy,
+        contradiction=context_result.contradiction,
+    )
+    warning_reasons = _warning_gate_reason_codes(
+        market=market,
+        rules_ambiguity_score=rules_result.ambiguity_score,
+        category_policy=category_policy,
+        evidence_bundle=evidence_bundle,
+    )
+    reason_codes.extend(soft_reasons)
+    reason_codes.extend(warning_reasons)
+
+    hard_block = (not internal_gate.passed) or rules_result.dispute_risk_flag or (not data_sufficient)
+    if not data_sufficient:
+        reason_codes.append("data_insufficient_for_acceptance")
+    external_consensus_insufficient = "external_consensus_insufficient" in context_result.reason_codes
+    require_external_consensus = bool(category_policy.get("require_external_consensus", False))
+    if external_consensus_insufficient and not require_external_consensus:
+        reason_codes.append("external_consensus_single_source_allowed")
+    soft_block = bool(soft_reasons) or ("cross_platform_contradiction_high" in context_result.reason_codes) or (
+        external_consensus_insufficient and require_external_consensus
+    )
+
+    decision = resolve_stage8_decision(
+        base_decision=str(base_decision or "SKIP"),
+        hard_block=hard_block,
+        soft_block=soft_block,
+        reason_codes=reason_codes,
+    )
+
+    market_prob = float(market.probability_yes or 0.5)
+    kelly = _kelly_fraction(internal_gate.edge_after_costs, market_prob)
+    payload = {
+        "signal_id": signal.id,
+        "stage7_decision_id": stage7.id if stage7 else None,
+        "category": category_result.category,
+        "category_confidence": category_result.confidence,
+        "policy_version": settings.stage8_policy_version,
+        "rules_ambiguity_score": rules_result.ambiguity_score,
+        "resolution_source_confidence": rules_result.resolution_source_confidence,
+        "dispute_risk_flag": rules_result.dispute_risk_flag,
+        "edge_after_costs": internal_gate.edge_after_costs,
+        "base_decision": base_decision,
+        "decision": decision.decision,
+        "execution_action": decision.execution_action,
+        "reason_codes": decision.reason_codes,
+        "hard_block_reason": decision.hard_block_reason,
+        "evidence_bundle": evidence_bundle,
+        "kelly_fraction": round(kelly, 6),
+        "pnl_proxy_usd_100": round(float(internal_gate.edge_after_costs) * 100.0, 6),
+    }
+    return payload, missing_stage7
+
+
 def build_stage8_shadow_ledger_report(
     db: Session,
     *,
@@ -337,97 +431,18 @@ def build_stage8_shadow_ledger_report(
     missing_stage7 = 0
 
     for signal, market, platform in signal_rows:
-
         stage7 = stage7_map.get(int(signal.id))
-        if not stage7:
-            missing_stage7 += 1
-            base_decision = "SKIP"
-            evidence_bundle: dict[str, Any] = {}
-        else:
-            base_decision = stage7.decision
-            evidence_bundle = dict(stage7.evidence_bundle or {})
-
-        category_result = classify_market_category(
-            market,
-            confidence_floor=float(settings.stage8_category_confidence_floor),
-        )
-        category_policy = get_category_policy(category_result.category, profile)
-
-        internal_gate = evaluate_internal_gate_v2(
+        payload, is_missing_stage7 = _build_stage8_payload_for_signal(
             signal=signal,
             market=market,
-            category_policy=category_policy,
-        )
-        rules_result = evaluate_rules_fields(
-            market,
             platform=platform,
-            category_policy=category_policy,
+            stage7=stage7,
+            profile=profile,
+            settings=settings,
+            data_sufficient=data_sufficient,
         )
-        context_result = route_external_context(
-            evidence_bundle,
-            max_contradiction=float(category_policy.get("max_cross_platform_contradiction", 1.0)),
-        )
-
-        reason_codes: list[str] = []
-        reason_codes.extend(category_result.reason_codes)
-        reason_codes.extend(internal_gate.reason_codes)
-        reason_codes.extend(rules_result.reason_codes)
-        reason_codes.extend(context_result.reason_codes)
-
-        soft_reasons = _soft_gate_reason_codes(
-            signal=signal,
-            market=market,
-            category_policy=category_policy,
-            contradiction=context_result.contradiction,
-        )
-        warning_reasons = _warning_gate_reason_codes(
-            market=market,
-            rules_ambiguity_score=rules_result.ambiguity_score,
-            category_policy=category_policy,
-            evidence_bundle=evidence_bundle,
-        )
-        reason_codes.extend(soft_reasons)
-        reason_codes.extend(warning_reasons)
-
-        hard_block = (not internal_gate.passed) or rules_result.dispute_risk_flag or (not data_sufficient)
-        if not data_sufficient:
-            reason_codes.append("data_insufficient_for_acceptance")
-        external_consensus_insufficient = "external_consensus_insufficient" in context_result.reason_codes
-        require_external_consensus = bool(category_policy.get("require_external_consensus", False))
-        if external_consensus_insufficient and not require_external_consensus:
-            reason_codes.append("external_consensus_single_source_allowed")
-        soft_block = bool(soft_reasons) or ("cross_platform_contradiction_high" in context_result.reason_codes) or (
-            external_consensus_insufficient and require_external_consensus
-        )
-
-        decision = resolve_stage8_decision(
-            base_decision=str(base_decision or "SKIP"),
-            hard_block=hard_block,
-            soft_block=soft_block,
-            reason_codes=reason_codes,
-        )
-
-        market_prob = float(market.probability_yes or 0.5)
-        kelly = _kelly_fraction(internal_gate.edge_after_costs, market_prob)
-        payload = {
-            "signal_id": signal.id,
-            "stage7_decision_id": stage7.id if stage7 else None,
-            "category": category_result.category,
-            "category_confidence": category_result.confidence,
-            "policy_version": settings.stage8_policy_version,
-            "rules_ambiguity_score": rules_result.ambiguity_score,
-            "resolution_source_confidence": rules_result.resolution_source_confidence,
-            "dispute_risk_flag": rules_result.dispute_risk_flag,
-            "edge_after_costs": internal_gate.edge_after_costs,
-            "base_decision": base_decision,
-            "decision": decision.decision,
-            "execution_action": decision.execution_action,
-            "reason_codes": decision.reason_codes,
-            "hard_block_reason": decision.hard_block_reason,
-            "evidence_bundle": evidence_bundle,
-            "kelly_fraction": round(kelly, 6),
-            "pnl_proxy_usd_100": round(float(internal_gate.edge_after_costs) * 100.0, 6),
-        }
+        if is_missing_stage7:
+            missing_stage7 += 1
         save_stage8_decision(db, payload=payload, existing_row=today_stage8_map.get(signal.id))
         rows.append(payload)
 

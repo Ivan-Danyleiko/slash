@@ -127,88 +127,99 @@ def _safe_error(exc: Exception, *, max_len: int = 240) -> str:
     return redact_text(str(exc), max_len=max_len)
 
 
-def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="sync_all_platforms", stale_minutes=20)
-    if _is_recent_running_job(db, job_name="sync_all_platforms", stale_minutes=20):
+def _run_job_with_guard(
+    db: Session,
+    *,
+    job_name: str,
+    stale_minutes: int,
+    run_fn,
+) -> dict:
+    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=stale_minutes)
+    if _is_recent_running_job(db, job_name=job_name, stale_minutes=stale_minutes):
         return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "sync_all_platforms")
+    job = _start_job(db, job_name)
     try:
-        result = CollectorSyncService(db).sync_all(platform=platform)
+        result = run_fn()
         _finish_job(db, job, "SUCCESS", result)
         return {"status": "ok", "result": result}
     except Exception as exc:  # noqa: BLE001
         _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
         return {"status": "error", "error": _safe_error(exc)}
+
+
+def _run_job(
+    db: Session,
+    *,
+    job_name: str,
+    run_fn,
+    details_fn=None,
+    response_fn=None,
+) -> dict:
+    job = _start_job(db, job_name)
+    try:
+        payload = run_fn()
+        details = details_fn(payload) if callable(details_fn) else payload
+        _finish_job(db, job, "SUCCESS", details)
+        if callable(response_fn):
+            return response_fn(payload)
+        return {"status": "ok", "result": payload}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
+def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
+    return _run_job_with_guard(
+        db,
+        job_name="sync_all_platforms",
+        stale_minutes=20,
+        run_fn=lambda: CollectorSyncService(db).sync_all(platform=platform),
+    )
 
 
 def analyze_markets_job(db: Session) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="analyze_markets", stale_minutes=30)
-    if _is_recent_running_job(db, job_name="analyze_markets", stale_minutes=30):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "analyze_markets")
-    try:
-        result = SignalEngine(db).run()
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job_with_guard(
+        db,
+        job_name="analyze_markets",
+        stale_minutes=30,
+        run_fn=lambda: SignalEngine(db).run(),
+    )
 
 
 def detect_duplicates_job(db: Session) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="detect_duplicates", stale_minutes=45)
-    if _is_recent_running_job(db, job_name="detect_duplicates", stale_minutes=45):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "detect_duplicates")
-    try:
-        result = SignalEngine(db).detect_duplicates()
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job_with_guard(
+        db,
+        job_name="detect_duplicates",
+        stale_minutes=45,
+        run_fn=lambda: SignalEngine(db).detect_duplicates(),
+    )
 
 
 def analyze_rules_job(db: Session) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="analyze_rules", stale_minutes=25)
-    if _is_recent_running_job(db, job_name="analyze_rules", stale_minutes=25):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "analyze_rules")
-    try:
-        result = SignalEngine(db).analyze_rules()
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job_with_guard(
+        db,
+        job_name="analyze_rules",
+        stale_minutes=25,
+        run_fn=lambda: SignalEngine(db).analyze_rules(),
+    )
 
 
 def detect_divergence_job(db: Session) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="detect_divergence", stale_minutes=30)
-    if _is_recent_running_job(db, job_name="detect_divergence", stale_minutes=30):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "detect_divergence")
-    try:
-        result = SignalEngine(db).detect_divergence()
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job_with_guard(
+        db,
+        job_name="detect_divergence",
+        stale_minutes=30,
+        run_fn=lambda: SignalEngine(db).detect_divergence(),
+    )
 
 
 def generate_signals_job(db: Session) -> dict:
-    _cleanup_stale_running_jobs(db, job_name="generate_signals", stale_minutes=30)
-    if _is_recent_running_job(db, job_name="generate_signals", stale_minutes=30):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, "generate_signals")
-    try:
-        result = SignalEngine(db).generate_signals()
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job_with_guard(
+        db,
+        job_name="generate_signals",
+        stale_minutes=30,
+        run_fn=lambda: SignalEngine(db).generate_signals(),
+    )
 
 
 def send_test_signal_job(db: Session) -> dict:
@@ -481,87 +492,87 @@ def provider_contract_checks_job(db: Session) -> dict:
 
 def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200) -> dict:
     """Evaluate recent signals via Stage 7 LLM agent and store decisions."""
-    job = _start_job(db, "stage7_evaluate")
-    try:
-        settings = get_settings()
-        report = build_stage7_shadow_report(
+    settings = get_settings()
+    return _run_job(
+        db,
+        job_name="stage7_evaluate",
+        run_fn=lambda: build_stage7_shadow_report(
             db,
             settings=settings,
             lookback_days=lookback_days,
             limit=limit,
-        )
-        rows_total = len(list(report.get("rows") or []))
-        llm_calls = int((report.get("cost_control") or {}).get("llm_calls_run") or 0)
-        cache_hits = int((report.get("cost_control") or {}).get("cache_hits_run") or 0)
-        decision_counts = report.get("decision_counts") or {}
-        _finish_job(db, job, "SUCCESS", {
-            "rows_total": rows_total,
-            "llm_calls": llm_calls,
-            "cache_hits": cache_hits,
-            "decision_counts": decision_counts,
-        })
-        return {"status": "ok", "result": {
-            "rows_total": rows_total,
-            "llm_calls": llm_calls,
-            "cache_hits": cache_hits,
-            "decision_counts": decision_counts,
-        }}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        ),
+        details_fn=lambda report: {
+            "rows_total": len(list(report.get("rows") or [])),
+            "llm_calls": int((report.get("cost_control") or {}).get("llm_calls_run") or 0),
+            "cache_hits": int((report.get("cost_control") or {}).get("cache_hits_run") or 0),
+            "decision_counts": report.get("decision_counts") or {},
+        },
+        response_fn=lambda report: {
+            "status": "ok",
+            "result": {
+                "rows_total": len(list(report.get("rows") or [])),
+                "llm_calls": int((report.get("cost_control") or {}).get("llm_calls_run") or 0),
+                "cache_hits": int((report.get("cost_control") or {}).get("cache_hits_run") or 0),
+                "decision_counts": report.get("decision_counts") or {},
+            },
+        },
+    )
 
 
 def stage8_shadow_ledger_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
-    job = _start_job(db, "stage8_shadow_ledger")
-    try:
-        settings = get_settings()
-        report = build_stage8_shadow_ledger_report(
+    settings = get_settings()
+    return _run_job(
+        db,
+        job_name="stage8_shadow_ledger",
+        run_fn=lambda: build_stage8_shadow_ledger_report(
             db,
             settings=settings,
             lookback_days=lookback_days,
             limit=limit,
-        )
-        tracking = record_stage5_experiment(
-            run_name="stage8_shadow_ledger",
-            params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_shadow_ledger"},
-            metrics=extract_stage8_shadow_ledger_metrics(report),
-            tags={"policy_profile": settings.stage8_policy_profile},
-        )
-        _finish_job(db, job, "SUCCESS", {"tracking": tracking, "rows": report.get("rows_total")})
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        ),
+        details_fn=lambda report: {
+            "tracking": record_stage5_experiment(
+                run_name="stage8_shadow_ledger",
+                params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_shadow_ledger"},
+                metrics=extract_stage8_shadow_ledger_metrics(report),
+                tags={"policy_profile": settings.stage8_policy_profile},
+            ),
+            "rows": report.get("rows_total"),
+        },
+    )
 
 
 def stage8_final_report_job(db: Session, *, lookback_days: int = 14, limit: int = 300) -> dict:
-    job = _start_job(db, "stage8_final_report")
-    try:
-        settings = get_settings()
+    settings = get_settings()
+    def _run() -> dict:
         shadow = build_stage8_shadow_ledger_report(
             db,
             settings=settings,
             lookback_days=lookback_days,
             limit=limit,
         )
-        report = build_stage8_final_report(
+        return build_stage8_final_report(
             db,
             settings=settings,
             lookback_days=lookback_days,
             limit=limit,
             shadow_report=shadow,
         )
-        tracking = record_stage5_experiment(
-            run_name="stage8_final_report",
-            params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_final_report"},
-            metrics=extract_stage8_final_report_metrics(report),
-            tags={"final_decision": str(report.get("final_decision") or "")},
-        )
-        _finish_job(db, job, "SUCCESS", {"tracking": tracking, "final_decision": report.get("final_decision")})
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+    return _run_job(
+        db,
+        job_name="stage8_final_report",
+        run_fn=_run,
+        details_fn=lambda report: {
+            "tracking": record_stage5_experiment(
+                run_name="stage8_final_report",
+                params={"lookback_days": lookback_days, "limit": limit, "report_type": "stage8_final_report"},
+                metrics=extract_stage8_final_report_metrics(report),
+                tags={"final_decision": str(report.get("final_decision") or "")},
+            ),
+            "final_decision": report.get("final_decision"),
+        },
+    )
 
 
 def stage9_track_job(
@@ -571,36 +582,29 @@ def stage9_track_job(
     days_labeling: int = 30,
     days_execution: int = 14,
 ) -> dict:
-    job = _start_job(db, "stage9_track")
-    try:
-        settings = get_settings()
-        report = build_stage9_batch_report(
+    settings = get_settings()
+    return _run_job(
+        db,
+        job_name="stage9_track",
+        run_fn=lambda: build_stage9_batch_report(
             db,
             settings=settings,
             days_consensus=days_consensus,
             days_labeling=days_labeling,
             days_execution=days_execution,
-        )
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "tracked_runs": len(dict(report.get("tracking") or {})),
-                "consensus_3source_share": float(
-                    ((report.get("reports") or {}).get("stage9_consensus_quality") or {}).get("consensus_3source_share")
-                    or 0.0
-                ),
-                "non_zero_edge_share": float(
-                    ((report.get("reports") or {}).get("stage9_execution_realism") or {}).get("non_zero_edge_share")
-                    or 0.0
-                ),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        ),
+        details_fn=lambda report: {
+            "tracked_runs": len(dict(report.get("tracking") or {})),
+            "consensus_3source_share": float(
+                ((report.get("reports") or {}).get("stage9_consensus_quality") or {}).get("consensus_3source_share")
+                or 0.0
+            ),
+            "non_zero_edge_share": float(
+                ((report.get("reports") or {}).get("stage9_execution_realism") or {}).get("non_zero_edge_share")
+                or 0.0
+            ),
+        },
+    )
 
 
 def stage10_track_job(
@@ -610,40 +614,31 @@ def stage10_track_job(
     limit: int = 5000,
     event_target: int = 100,
 ) -> dict:
-    job = _start_job(db, "stage10_track")
-    try:
-        settings = get_settings()
-        report = build_stage10_batch_report(
+    settings = get_settings()
+    return _run_job(
+        db,
+        job_name="stage10_track",
+        run_fn=lambda: build_stage10_batch_report(
             db,
             settings=settings,
             days=days,
             limit=limit,
             event_target=event_target,
-        )
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "tracked_runs": len(dict(report.get("tracking") or {})),
-                "events_total": int(
-                    (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get(
-                        "events_total"
-                    )
-                    or 0
-                ),
-                "leakage_violations_count": int(
-                    (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get(
-                        "leakage_violations_count"
-                    )
-                    or 0
-                ),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        ),
+        details_fn=lambda report: {
+            "tracked_runs": len(dict(report.get("tracking") or {})),
+            "events_total": int(
+                (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get("events_total")
+                or 0
+            ),
+            "leakage_violations_count": int(
+                (((report.get("reports") or {}).get("stage10_replay") or {}).get("summary") or {}).get(
+                    "leakage_violations_count"
+                )
+                or 0
+            ),
+        },
+    )
 
 
 def stage10_timeline_backfill_job(
@@ -653,30 +648,23 @@ def stage10_timeline_backfill_job(
     limit: int = 500,
     per_platform_limit: int = 100,
 ) -> dict:
-    job = _start_job(db, "stage10_timeline_backfill")
-    try:
-        settings = get_settings()
-        report = run_stage10_timeline_backfill(
+    settings = get_settings()
+    return _run_job(
+        db,
+        job_name="stage10_timeline_backfill",
+        run_fn=lambda: run_stage10_timeline_backfill(
             db,
             settings=settings,
             days=days,
             limit=limit,
             per_platform_limit=per_platform_limit,
             dry_run=False,
-        )
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "updated_rows": int(report.get("updated_rows") or 0),
-                "total_candidates": int(report.get("total_candidates") or 0),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        ),
+        details_fn=lambda report: {
+            "updated_rows": int(report.get("updated_rows") or 0),
+            "total_candidates": int(report.get("total_candidates") or 0),
+        },
+    )
 
 
 def stage11_track_job(

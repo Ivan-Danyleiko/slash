@@ -87,42 +87,31 @@ def _max_concurrent_positions(rows: list[Stage17TailPosition]) -> int:
     return int(max(0, peak))
 
 
-def _by_category(rows: list[Stage17TailPosition]) -> dict[str, Any]:
+def _group_closed_stats(rows: list[Stage17TailPosition], key_fn) -> dict[str, Any]:
     by: dict[str, dict[str, Any]] = {}
     for row in rows:
-        cat = str(row.tail_category or "unknown")
-        b = by.setdefault(cat, {"closed": 0, "wins": 0, "pnl_usd": 0.0})
+        key = str(key_fn(row) or "unknown")
+        b = by.setdefault(key, {"closed": 0, "wins": 0, "pnl_usd": 0.0})
         b["closed"] += 1
         pnl = float(row.realized_pnl_usd or 0.0)
         if pnl > 0:
             b["wins"] += 1
         b["pnl_usd"] += pnl
-    for cat, val in by.items():
+    for k, val in by.items():
         closed = int(val["closed"] or 0)
         wins = int(val["wins"] or 0)
         val["win_rate_tail"] = (wins / closed) if closed > 0 else 0.0
         val["pnl_usd"] = float(val["pnl_usd"] or 0.0)
-        by[cat] = val
+        by[k] = val
     return by
+
+
+def _by_category(rows: list[Stage17TailPosition]) -> dict[str, Any]:
+    return _group_closed_stats(rows, key_fn=lambda row: row.tail_category)
 
 
 def _by_variation(rows: list[Stage17TailPosition]) -> dict[str, Any]:
-    by: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        variation = str(row.tail_variation or "unknown")
-        b = by.setdefault(variation, {"closed": 0, "wins": 0, "pnl_usd": 0.0})
-        b["closed"] += 1
-        pnl = float(row.realized_pnl_usd or 0.0)
-        if pnl > 0:
-            b["wins"] += 1
-        b["pnl_usd"] += pnl
-    for variation, val in by.items():
-        closed = int(val["closed"] or 0)
-        wins = int(val["wins"] or 0)
-        val["win_rate_tail"] = (wins / closed) if closed > 0 else 0.0
-        val["pnl_usd"] = float(val["pnl_usd"] or 0.0)
-        by[variation] = val
-    return by
+    return _group_closed_stats(rows, key_fn=lambda row: row.tail_variation)
 
 
 def build_stage17_tail_report(

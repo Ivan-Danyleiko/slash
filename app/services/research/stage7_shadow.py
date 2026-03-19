@@ -193,14 +193,13 @@ def _fallback_baseline_from_history(
     return baseline_rows, signal_map, resolved_map
 
 
-def build_stage7_shadow_report(
+def _load_shadow_baseline(
     db: Session,
     *,
     settings: Settings,
-    lookback_days: int = 14,
-    limit: int = 300,
-) -> dict[str, Any]:
-    lookback_days = max(1, min(int(lookback_days), 90))
+    lookback_days: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[int, Any], dict[int, bool | None], dict[str, Any]]:
     baseline = build_agent_decision_report(
         db,
         settings=settings,
@@ -226,8 +225,15 @@ def build_stage7_shadow_report(
     resolved = _resolved_success_map(db, signal_ids)
     if fallback_resolved:
         resolved.update(fallback_resolved)
-    provider_key = _provider_key(settings)
+    return baseline_rows, by_id, resolved, baseline
 
+
+def _shadow_cost_control(
+    db: Session,
+    *,
+    settings: Settings,
+    provider_key: str,
+) -> tuple[str, float, float]:
     month_start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_rows = list(
         db.scalars(
@@ -239,30 +245,28 @@ def build_stage7_shadow_report(
     monthly_spend_usd = sum(float(r.llm_cost_usd or 0.0) for r in month_rows)
     budget = float(settings.stage7_agent_monthly_budget_usd)
     if monthly_spend_usd > (budget * 1.0):
-        cost_mode = "hard_cutoff"
-    elif monthly_spend_usd > (budget * 0.80):
-        cost_mode = "cached_only"
-    else:
-        cost_mode = "normal"
+        return "hard_cutoff", monthly_spend_usd, budget
+    if monthly_spend_usd > (budget * 0.80):
+        return "cached_only", monthly_spend_usd, budget
+    return "normal", monthly_spend_usd, budget
 
-    rows: list[dict[str, Any]] = []
-    latencies_ms: list[float] = []
-    stability_matches = 0
-    stability_total = 0
-    cache_hits = 0
-    llm_calls = 0
-    llm_spend_run = 0.0
-    call_cost_usd = float(settings.stage7_agent_cost_per_call_usd)
-    adapter = get_stage7_adapter(settings)
+
+def _preload_shadow_runtime(
+    db: Session,
+    *,
+    settings: Settings,
+    by_id: dict[int, Any],
+    baseline_rows: list[dict[str, Any]],
+) -> tuple[dict[int, Market], dict[str, Any], dict[str, Any], dict[int, dict[str, Any]]]:
     tool_runtime_cache: dict[str, Any] = {}
     rag_runtime_cache: dict[int, dict[str, Any]] = {}
-    portfolio_ctx = (
-        get_portfolio_snapshot(db) if bool(settings.stage7_portfolio_context_enabled) else {}
-    )
+    portfolio_ctx = get_portfolio_snapshot(db) if bool(settings.stage7_portfolio_context_enabled) else {}
     market_ids = [int(s.market_id) for s in by_id.values()]
     market_by_id = {
         int(m.id): m for m in db.scalars(select(Market).where(Market.id.in_(market_ids)))
     } if market_ids else {}
+
+    signal_ids = [int(r.get("signal_id") or 0) for r in baseline_rows if int(r.get("signal_id") or 0) > 0]
     if signal_ids:
         latest_hist_rows = list(
             db.scalars(
@@ -277,6 +281,146 @@ def build_stage7_shadow_report(
             if sid and sid not in latest_history_by_signal_id:
                 latest_history_by_signal_id[sid] = row
         tool_runtime_cache["latest_history_by_signal_id"] = latest_history_by_signal_id
+    return market_by_id, tool_runtime_cache, portfolio_ctx, rag_runtime_cache
+
+
+def _shadow_summary_metrics(
+    *,
+    rows: list[dict[str, Any]],
+    resolved: dict[int, bool | None],
+    stability_matches: int,
+    stability_total: int,
+    latencies_ms: list[float],
+) -> dict[str, Any]:
+    base_counts = _decision_counts(rows, "base_decision")
+    agent_counts = _decision_counts(rows, "agent_decision")
+    total = max(1, len(rows))
+    delta_keep_rate = round((agent_counts["KEEP"] - base_counts["KEEP"]) / total, 6)
+    baseline_precision = _precision_for(rows, decision_key="base_decision", resolved=resolved)
+    post_hoc_precision = _precision_for(rows, decision_key="agent_decision", resolved=resolved)
+    reason_code_stability = round((stability_matches / max(1, stability_total)), 6)
+    p95 = round(quantiles(latencies_ms, n=100)[94], 4) if len(latencies_ms) >= 20 else (
+        round(max(latencies_ms), 4) if latencies_ms else 0.0
+    )
+    return {
+        "base_counts": base_counts,
+        "agent_counts": agent_counts,
+        "delta_keep_rate": delta_keep_rate,
+        "baseline_precision": baseline_precision,
+        "post_hoc_precision": post_hoc_precision,
+        "reason_code_stability": reason_code_stability,
+        "latency_p95_ms": p95,
+    }
+
+
+def _build_cost_blocked_payload(
+    *,
+    sid: int,
+    base_row: dict[str, Any],
+    evidence: dict[str, Any],
+    input_hash: str,
+    provider_key: str,
+    reason_code: str,
+    confidence_adjustment: float,
+) -> dict[str, Any]:
+    return {
+        "signal_id": sid,
+        "base_decision": str(base_row.get("decision") or "SKIP"),
+        "decision": "SKIP",
+        "confidence_adjustment": float(confidence_adjustment),
+        "reason_codes": [reason_code],
+        "evidence_bundle": evidence,
+        "input_hash": input_hash,
+        "model_id": "stage7_verifier",
+        "model_version": "v1",
+        "prompt_template_version": "stage7_prompt_v2",
+        "provider": provider_key,
+        "provider_fingerprint": "deterministic_local",
+        "llm_cost_usd": 0.0,
+        "cache_hit": False,
+    }
+
+
+def _build_shadow_row(
+    *,
+    sid: int,
+    base_row: dict[str, Any],
+    composed: dict[str, Any],
+    trace_id: str,
+    span_gate_ms: float,
+    span_external_ms: float,
+    span_decision_ms: float,
+    latency_ms: float,
+    resolved_success: bool | None,
+) -> dict[str, Any]:
+    return {
+        "signal_id": sid,
+        "signal_type": base_row.get("signal_type"),
+        "base_decision": base_row.get("decision"),
+        "agent_decision": composed.get("decision"),
+        "confidence_adjustment": composed.get("confidence_adjustment"),
+        "estimated_success_prob": round(
+            min(
+                1.0,
+                max(
+                    0.0,
+                    float(base_row.get("confidence") or 0.0)
+                    + float(composed.get("confidence_adjustment") or 0.0),
+                ),
+            ),
+            6,
+        ),
+        "reason_codes": composed.get("reason_codes") or [],
+        "input_hash": composed.get("input_hash"),
+        "cache_hit": bool(composed.get("cache_hit")),
+        "llm_cost_usd": float(composed.get("llm_cost_usd") or 0.0),
+        "latency_ms": round(float(latency_ms), 4),
+        "trace_id": trace_id,
+        "spans": {
+            "internal_gate_ms": round(float(span_gate_ms), 4),
+            "external_verification_ms": round(float(span_external_ms), 4),
+            "decision_composer_ms": round(float(span_decision_ms), 4),
+        },
+        "resolved_success": resolved_success,
+    }
+
+
+def build_stage7_shadow_report(
+    db: Session,
+    *,
+    settings: Settings,
+    lookback_days: int = 14,
+    limit: int = 300,
+) -> dict[str, Any]:
+    lookback_days = max(1, min(int(lookback_days), 90))
+    baseline_rows, by_id, resolved, baseline = _load_shadow_baseline(
+        db,
+        settings=settings,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    provider_key = _provider_key(settings)
+    cost_mode, monthly_spend_usd, budget = _shadow_cost_control(
+        db,
+        settings=settings,
+        provider_key=provider_key,
+    )
+
+    rows: list[dict[str, Any]] = []
+    latencies_ms: list[float] = []
+    stability_matches = 0
+    stability_total = 0
+    cache_hits = 0
+    llm_calls = 0
+    llm_spend_run = 0.0
+    call_cost_usd = float(settings.stage7_agent_cost_per_call_usd)
+    adapter = get_stage7_adapter(settings)
+    market_by_id, tool_runtime_cache, portfolio_ctx, rag_runtime_cache = _preload_shadow_runtime(
+        db,
+        settings=settings,
+        by_id=by_id,
+        baseline_rows=baseline_rows,
+    )
     for base_row in baseline_rows:
         trace_id = stage7_trace_id_fallback()
         sid = int(base_row.get("signal_id") or 0)
@@ -323,39 +467,25 @@ def build_stage7_shadow_report(
             cache_hits += 1
         else:
             if cost_mode == "hard_cutoff":
-                composed = {
-                    "signal_id": sid,
-                    "base_decision": str(base_row.get("decision") or "SKIP"),
-                    "decision": "SKIP",
-                    "confidence_adjustment": -0.30,
-                    "reason_codes": ["stage7_cost_hard_cutoff"],
-                    "evidence_bundle": evidence,
-                    "input_hash": str(composed.get("input_hash") or ""),
-                    "model_id": "stage7_verifier",
-                    "model_version": "v1",
-                    "prompt_template_version": "stage7_prompt_v2",
-                    "provider": provider_key,
-                    "provider_fingerprint": "deterministic_local",
-                    "llm_cost_usd": 0.0,
-                    "cache_hit": False,
-                }
+                composed = _build_cost_blocked_payload(
+                    sid=sid,
+                    base_row=base_row,
+                    evidence=evidence,
+                    input_hash=str(composed.get("input_hash") or ""),
+                    provider_key=provider_key,
+                    reason_code="stage7_cost_hard_cutoff",
+                    confidence_adjustment=-0.30,
+                )
             elif cost_mode == "cached_only":
-                composed = {
-                    "signal_id": sid,
-                    "base_decision": str(base_row.get("decision") or "SKIP"),
-                    "decision": "SKIP",
-                    "confidence_adjustment": -0.15,
-                    "reason_codes": ["stage7_cost_cached_only_miss"],
-                    "evidence_bundle": evidence,
-                    "input_hash": str(composed.get("input_hash") or ""),
-                    "model_id": "stage7_verifier",
-                    "model_version": "v1",
-                    "prompt_template_version": "stage7_prompt_v2",
-                    "provider": provider_key,
-                    "provider_fingerprint": "deterministic_local",
-                    "llm_cost_usd": 0.0,
-                    "cache_hit": False,
-                }
+                composed = _build_cost_blocked_payload(
+                    sid=sid,
+                    base_row=base_row,
+                    evidence=evidence,
+                    input_hash=str(composed.get("input_hash") or ""),
+                    provider_key=provider_key,
+                    reason_code="stage7_cost_cached_only_miss",
+                    confidence_adjustment=-0.15,
+                )
             else:
                 llm_calls += 1
                 llm_spend_run += call_cost_usd
@@ -468,36 +598,17 @@ def build_stage7_shadow_report(
         latencies_ms.append(ms)
 
         rows.append(
-            {
-                "signal_id": sid,
-                "signal_type": base_row.get("signal_type"),
-                "base_decision": base_row.get("decision"),
-                "agent_decision": composed.get("decision"),
-                "confidence_adjustment": composed.get("confidence_adjustment"),
-                "estimated_success_prob": round(
-                    min(
-                        1.0,
-                        max(
-                            0.0,
-                            float(base_row.get("confidence") or 0.0)
-                            + float(composed.get("confidence_adjustment") or 0.0),
-                        ),
-                    ),
-                    6,
-                ),
-                "reason_codes": composed.get("reason_codes") or [],
-                "input_hash": composed.get("input_hash"),
-                "cache_hit": bool(composed.get("cache_hit")),
-                "llm_cost_usd": float(composed.get("llm_cost_usd") or 0.0),
-                "latency_ms": round(ms, 4),
-                "trace_id": trace_id,
-                "spans": {
-                    "internal_gate_ms": round(span_gate_ms, 4),
-                    "external_verification_ms": round(span_external_ms, 4),
-                    "decision_composer_ms": round(span_decision_ms, 4),
-                },
-                "resolved_success": resolved.get(sid),
-            }
+            _build_shadow_row(
+                sid=sid,
+                base_row=base_row,
+                composed=composed,
+                trace_id=trace_id,
+                span_gate_ms=span_gate_ms,
+                span_external_ms=span_external_ms,
+                span_decision_ms=span_decision_ms,
+                latency_ms=ms,
+                resolved_success=resolved.get(sid),
+            )
         )
         logger.info(
             "stage7_shadow_decision signal_id=%s trace_id=%s input_hash=%s provider=%s base=%s agent=%s cache_hit=%s reason_codes=%s",
@@ -511,16 +622,20 @@ def build_stage7_shadow_report(
             list(composed.get("reason_codes") or []),
         )
 
-    base_counts = _decision_counts(rows, "base_decision")
-    agent_counts = _decision_counts(rows, "agent_decision")
-    total = max(1, len(rows))
-    delta_keep_rate = round((agent_counts["KEEP"] - base_counts["KEEP"]) / total, 6)
-    baseline_precision = _precision_for(rows, decision_key="base_decision", resolved=resolved)
-    post_hoc_precision = _precision_for(rows, decision_key="agent_decision", resolved=resolved)
-    reason_code_stability = round((stability_matches / max(1, stability_total)), 6)
-    p95 = round(quantiles(latencies_ms, n=100)[94], 4) if len(latencies_ms) >= 20 else (
-        round(max(latencies_ms), 4) if latencies_ms else 0.0
+    summary = _shadow_summary_metrics(
+        rows=rows,
+        resolved=resolved,
+        stability_matches=stability_matches,
+        stability_total=stability_total,
+        latencies_ms=latencies_ms,
     )
+    base_counts = dict(summary["base_counts"])
+    agent_counts = dict(summary["agent_counts"])
+    delta_keep_rate = float(summary["delta_keep_rate"])
+    baseline_precision = float(summary["baseline_precision"])
+    post_hoc_precision = float(summary["post_hoc_precision"])
+    reason_code_stability = float(summary["reason_code_stability"])
+    p95 = float(summary["latency_p95_ms"])
 
     baseline_total = int(baseline.get("total_signals") or 0) if baseline_rows else 0
     if baseline_total <= 0:
