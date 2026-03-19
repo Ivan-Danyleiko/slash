@@ -1509,6 +1509,10 @@ class SignalEngine:
             if our_prob < min_our_prob:
                 below_mispricing += 1
                 continue
+            # For YES tail bets we need our_prob > market_prob (market underprices the event).
+            if our_prob <= market_prob:
+                below_mispricing += 1
+                continue
             mispricing_ratio = tail_mispricing_ratio(market_prob=market_prob, our_prob=our_prob)
             if (our_prob <= (market_prob * min_mispricing)) or (mispricing_ratio < min_mispricing):
                 below_mispricing += 1

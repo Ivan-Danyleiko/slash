@@ -61,8 +61,18 @@ class BaseRateEstimator:
                 source="deterministic_fallback_bet_yes_underpriced",
                 reasoning="no_external_or_historical_signal",
             ).to_dict()
-        # llm_evaluate fallback: markets systematically overprice dramatic events,
-        # so apply a conservative 0.65x correction as prior until LLM runs.
+        # llm_evaluate fallback:
+        # At low probabilities (< 0.15, koef > x6) markets tend to underprice tail risk,
+        # so apply the same bet_yes_underpriced uplift (our_prob > market_prob).
+        # At higher probabilities markets tend to overprice dramatic events (0.65x correction).
+        if market_prob < 0.15:
+            our = min(0.99, max(0.001, market_prob / 0.60))
+            return BaseRateEstimate(
+                our_prob=our,
+                confidence=0.25,
+                source="deterministic_fallback_llm_low_prob_uplift",
+                reasoning="low_prob_tail_uplift_pending_llm",
+            ).to_dict()
         our = max(0.001, market_prob * 0.65)
         return BaseRateEstimate(
             our_prob=our,
