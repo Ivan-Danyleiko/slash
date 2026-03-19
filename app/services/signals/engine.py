@@ -319,6 +319,7 @@ class SignalEngine:
         liquidity_by_market = {row.market_id: row.score for row in liquidity_rows}
         rules_rows = list(self.db.scalars(select(RulesAnalysis)))
         rules_by_market = {row.market_id: row.score for row in rules_rows}
+        platform_by_id = {p.id: str(p.name or "").upper() for p in self.db.scalars(select(Platform))}
 
         # Pre-load all markets referenced by rules_rows to avoid N+1 db.get() in the rules loop below.
         rules_market_ids = [row.market_id for row in rules_rows]
@@ -541,7 +542,7 @@ class SignalEngine:
             if len(bucket) < 2:
                 bucket.append(snap)
 
-        arbitrage_candidates: list[tuple[Market, float, float, float, str, float, float]] = []
+        arbitrage_candidates: list[tuple[Market, float, float, float, str, float, float, str]] = []
         for market in self.db.scalars(select(Market).where(Market.probability_yes.is_not(None))):
             arbitrage_attempted += 1
             title_l = (market.title or "").lower()
@@ -551,11 +552,25 @@ class SignalEngine:
             if " i " in f" {title_l} " or " my " in f" {title_l} ":
                 arbitrage_personal_market_skipped += 1
                 continue
+            platform_name = str(
+                (market.source_payload or {}).get("platform") or platform_by_id.get(market.platform_id) or ""
+            ).upper()
+            is_manifold = platform_name == "MANIFOLD"
+            min_liquidity = (
+                self.settings.signal_arbitrage_min_liquidity_manifold
+                if is_manifold
+                else self.settings.signal_arbitrage_min_liquidity
+            )
             liq = liquidity_by_market.get(market.id, 0.0)
-            if liq < self.settings.signal_arbitrage_min_liquidity:
+            if liq < min_liquidity:
                 arbitrage_low_liquidity_skipped += 1
                 continue
-            if (market.volume_24h or 0.0) < self.settings.signal_arbitrage_min_volume_24h:
+            min_volume = (
+                self.settings.signal_arbitrage_min_volume_24h_manifold
+                if is_manifold
+                else self.settings.signal_arbitrage_min_volume_24h
+            )
+            if (market.volume_24h or 0.0) < min_volume:
                 arbitrage_low_volume_skipped += 1
                 continue
 
@@ -585,12 +600,39 @@ class SignalEngine:
             if mode == "uncertainty_liquid":
                 confidence = min(confidence, self.settings.signal_mode_uncertainty_max_score)
             snapshot_age_hours = self._hours_since(pair[0].fetched_at)
-            arbitrage_candidates.append((market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move))
+            arbitrage_candidates.append(
+                (market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move, platform_name)
+            )
 
         arbitrage_candidates.sort(key=lambda x: x[1], reverse=True)
-        for market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move in arbitrage_candidates[
-            : self.settings.signal_arbitrage_max_candidates
-        ]:
+        max_candidates = max(1, int(self.settings.signal_arbitrage_max_candidates))
+        manifold_quota = max(0, int(self.settings.signal_arbitrage_min_manifold_candidates))
+        manifold_quota = min(manifold_quota, max_candidates)
+        selected: list[tuple[Market, float, float, float, str, float, float, str]] = []
+        selected_market_ids: set[int] = set()
+        if manifold_quota > 0:
+            for cand in arbitrage_candidates:
+                market = cand[0]
+                platform_name = cand[7]
+                if platform_name != "MANIFOLD":
+                    continue
+                if market.id in selected_market_ids:
+                    continue
+                selected.append(cand)
+                selected_market_ids.add(market.id)
+                if len(selected) >= manifold_quota:
+                    break
+        if len(selected) < max_candidates:
+            for cand in arbitrage_candidates:
+                market = cand[0]
+                if market.id in selected_market_ids:
+                    continue
+                selected.append(cand)
+                selected_market_ids.add(market.id)
+                if len(selected) >= max_candidates:
+                    break
+
+        for market, confidence, move, midpoint_distance, mode, snapshot_age_hours, signed_move, _platform_name in selected:
             rr = rules_by_market.get(market.id)
             score_breakdown = self._score_breakdown(
                 edge=min(1.0, move / 0.20) if mode == "momentum" else 0.3,

@@ -114,7 +114,16 @@ class Settings(BaseSettings):
     signal_arbitrage_min_volume_24h: float = Field(default=250.0, alias="SIGNAL_ARBITRAGE_MIN_VOLUME_24H")
     signal_arbitrage_min_move: float = Field(default=0.08, alias="SIGNAL_ARBITRAGE_MIN_MOVE")
     signal_arbitrage_midpoint_band: float = Field(default=0.12, alias="SIGNAL_ARBITRAGE_MIDPOINT_BAND")
-    signal_arbitrage_max_candidates: int = Field(default=6, alias="SIGNAL_ARBITRAGE_MAX_CANDIDATES")
+    signal_arbitrage_max_candidates: int = Field(default=30, alias="SIGNAL_ARBITRAGE_MAX_CANDIDATES")
+    signal_arbitrage_min_liquidity_manifold: float = Field(
+        default=0.25, alias="SIGNAL_ARBITRAGE_MIN_LIQUIDITY_MANIFOLD"
+    )
+    signal_arbitrage_min_volume_24h_manifold: float = Field(
+        default=30.0, alias="SIGNAL_ARBITRAGE_MIN_VOLUME_24H_MANIFOLD"
+    )
+    signal_arbitrage_min_manifold_candidates: int = Field(
+        default=10, alias="SIGNAL_ARBITRAGE_MIN_MANIFOLD_CANDIDATES"
+    )
     signal_arbitrage_exclude_keywords: str = Field(
         default="coinflip,coin flip,lottery,dice,die roll,random,daily coin,daily coin flip,free lottery",
         alias="SIGNAL_ARBITRAGE_EXCLUDE_KEYWORDS",
