@@ -147,6 +147,7 @@ def run(
     limit: int,
     *,
     invert_momentum: bool = False,
+    invert_uncertainty_liquid: bool = False,
     mode_filter: set[str] | None = None,
 ) -> dict[str, Any]:
     cutoff = datetime.now(UTC) - timedelta(days=max(1, int(days)))
@@ -250,6 +251,8 @@ def run(
             side = _normalize_side(signal.signal_direction)
             if invert_momentum and mode == "momentum":
                 side = "NO" if side == "YES" else "YES"
+            if invert_uncertainty_liquid and mode == "uncertainty_liquid":
+                side = "NO" if side == "YES" else "YES"
             pnl = _pnl_per_1usd(side, entry_yes, outcome)
             win = pnl > 0.0
 
@@ -312,6 +315,7 @@ def run(
         return {
             "days": days,
             "invert_momentum": invert_momentum,
+            "invert_uncertainty_liquid": invert_uncertainty_liquid,
             "mode_filter": sorted(mode_filter) if mode_filter else None,
             "signals_considered": len(rows),
             "resolved_signals": resolved_total,
@@ -346,6 +350,11 @@ def main() -> None:
         default="",
         help="Comma-separated signal modes to include (e.g. momentum,uncertainty_liquid).",
     )
+    parser.add_argument(
+        "--invert-uncertainty-liquid",
+        action="store_true",
+        help="Invert side only for uncertainty_liquid signals (A/B hypothesis test).",
+    )
     args = parser.parse_args()
     mode_filter = {
         _normalize_signal_mode(x)
@@ -356,6 +365,7 @@ def main() -> None:
         days=args.days,
         limit=args.limit,
         invert_momentum=bool(args.invert_momentum),
+        invert_uncertainty_liquid=bool(args.invert_uncertainty_liquid),
         mode_filter=mode_filter or None,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
