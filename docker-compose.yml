@@ -23,7 +23,7 @@ services:
   worker:
     build: .
     env_file: .env
-    command: celery -A app.tasks.worker.celery_app worker -B -l info
+    command: celery -A app.tasks.worker.celery_app worker -B -l info --concurrency=2 --max-memory-per-child=400000
     restart: unless-stopped
     volumes:
       - ./artifacts:/app/artifacts
