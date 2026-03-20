@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import inspect as sa_inspect, select
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -230,6 +230,16 @@ def run_stage10_timeline_backfill(
             if platform == "METACULUS"
             else float(settings.stage10_backfill_manifold_delay_seconds)
         )
+        # Batch-preload all markets for this platform's rows (eliminates N+1)
+        _batch_ids = [int(r.get("market_id") or 0) for r in rows if int(r.get("market_id") or 0) > 0]
+        _market_map: dict[int, tuple[Any, bool]] = {}
+        if _batch_ids:
+            try:
+                for _m in db.scalars(select(Market).where(Market.id.in_(_batch_ids))):
+                    _market_map[_m.id] = (_m, True)
+            except OperationalError:
+                pass  # will fall back to _load_market_compat per-row below
+
         for row in rows:
             if platform_unreachable:
                 reason_counts[f"{platform.lower()}_platform_unreachable_break"] = (
@@ -243,7 +253,10 @@ def run_stage10_timeline_backfill(
             if market_id <= 0:
                 reason_counts["candidate_missing_market_id"] = reason_counts.get("candidate_missing_market_id", 0) + 1
                 continue
-            market, is_orm = _load_market_compat(db, market_id)
+            if market_id in _market_map:
+                market, is_orm = _market_map[market_id]
+            else:
+                market, is_orm = _load_market_compat(db, market_id)
             if market is None:
                 reason_counts["market_not_found"] = reason_counts.get("market_not_found", 0) + 1
                 continue
