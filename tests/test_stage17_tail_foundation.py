@@ -50,6 +50,84 @@ def test_stage17_tail_classifier_blocks_tbd_resolution_source() -> None:
     assert "tail_resolution_ambiguity" in str(out.get("skip_reason"))
 
 
+def test_stage17_tail_classifier_matches_election_and_company_valuation() -> None:
+    settings = SignalEngine(_mk_db()).settings.model_copy(
+        update={"signal_tail_max_days_to_resolution": 365}
+    )
+    election_market = Market(
+        platform_id=1,
+        external_market_id="m-election-1",
+        title="Will JD Vance win the 2028 US Presidential election?",
+        probability_yes=0.09,
+        volume_24h=2500.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=220),
+    )
+    out1 = classify_tail_event(election_market, settings=settings)
+    assert out1 is not None
+    assert bool(out1.get("eligible")) is True
+    assert out1.get("tail_category") == "election"
+
+    company_market = Market(
+        platform_id=1,
+        external_market_id="m-company-1",
+        title="Will Discord go public via IPO before 2027?",
+        probability_yes=0.11,
+        volume_24h=5000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=180),
+    )
+    out2 = classify_tail_event(company_market, settings=settings)
+    assert out2 is not None
+    assert bool(out2.get("eligible")) is True
+    assert out2.get("tail_category") == "company_valuation"
+
+
+def test_stage17_tail_classifier_matches_fifa_world_cup_as_sports() -> None:
+    settings = SignalEngine(_mk_db()).settings.model_copy(update={"signal_tail_max_days_to_resolution": 365})
+    market = Market(
+        platform_id=1,
+        external_market_id="m-sports-fifa-1",
+        title="Will Spain win the 2026 FIFA World Cup?",
+        description="International football tournament winner market.",
+        probability_yes=0.12,
+        volume_24h=3500.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=280),
+    )
+    out = classify_tail_event(market, settings=settings)
+    assert out is not None
+    assert bool(out.get("eligible")) is True
+    assert out.get("tail_category") == "sports_match"
+
+
+def test_stage17_tail_classifier_subject_to_is_not_hard_block() -> None:
+    market = Market(
+        platform_id=1,
+        external_market_id="m-legal-1",
+        title="Will Team A win the NBA finals?",
+        rules_text="Resolution subject to official NBA publication.",
+        probability_yes=0.07,
+        volume_24h=3000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=25),
+    )
+    out = classify_tail_event(market, settings=SignalEngine(_mk_db()).settings)
+    assert out is not None
+    assert bool(out.get("eligible")) is True
+    assert out.get("tail_category") == "sports_match"
+
+
+def test_stage17_tail_classifier_respects_max_days_to_resolution() -> None:
+    settings = SignalEngine(_mk_db()).settings.model_copy(update={"signal_tail_max_days_to_resolution": 365})
+    market = Market(
+        platform_id=1,
+        external_market_id="m-too-long-1",
+        title="Will candidate X win the 2028 presidential election?",
+        probability_yes=0.09,
+        volume_24h=4000.0,
+        resolution_time=datetime.now(UTC) + timedelta(days=500),
+    )
+    out = classify_tail_event(market, settings=settings)
+    assert out is None
+
+
 def test_stage17_tail_circuit_breaker_budget_and_category_limit() -> None:
     db = _mk_db()
     settings = SignalEngine(db).settings

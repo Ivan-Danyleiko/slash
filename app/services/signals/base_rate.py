@@ -51,35 +51,75 @@ class BaseRateEstimator:
         if hist is not None:
             return hist.to_dict()
 
-        # deterministic fallback (no direct LLM call in stage17 foundation)
-        if strategy == "bet_yes_underpriced":
-            # Deterministic uplift prior for high-koef underpricing entries.
-            our = min(0.99, max(0.001, market_prob / 0.60))
-            return BaseRateEstimate(
-                our_prob=our,
-                confidence=0.35,
-                source="deterministic_fallback_bet_yes_underpriced",
-                reasoning="no_external_or_historical_signal",
-            ).to_dict()
-        # llm_evaluate fallback:
-        # At low probabilities (< 0.15, koef > x6) markets tend to underprice tail risk,
-        # so apply the same bet_yes_underpriced uplift (our_prob > market_prob).
-        # At higher probabilities markets tend to overprice dramatic events (0.65x correction).
-        if market_prob < 0.15:
-            our = min(0.99, max(0.001, market_prob / 0.60))
-            return BaseRateEstimate(
-                our_prob=our,
-                confidence=0.25,
-                source="deterministic_fallback_llm_low_prob_uplift",
-                reasoning="low_prob_tail_uplift_pending_llm",
-            ).to_dict()
-        our = max(0.001, market_prob * 0.65)
+        # deterministic category-aware fallback
+        our = self._deterministic_prob_by_category(
+            tail_category=tail_category,
+            market_prob=market_prob,
+        )
+        conf = self._deterministic_confidence_by_category(
+            tail_category=tail_category,
+            market_prob=market_prob,
+            strategy=strategy,
+        )
+        reasoning = f"category_rule:{tail_category};strategy={strategy};market_prob={market_prob:.4f}"
         return BaseRateEstimate(
             our_prob=our,
-            confidence=0.25,
-            source="deterministic_fallback_llm_prior",
-            reasoning="llm_evaluate_pending_using_overpricing_prior",
+            confidence=conf,
+            source="deterministic_category_prior_v2",
+            reasoning=reasoning,
         ).to_dict()
+
+    @staticmethod
+    def _clamp_prob(value: float) -> float:
+        return min(0.99, max(0.001, float(value)))
+
+    def _deterministic_prob_by_category(self, *, tail_category: str, market_prob: float) -> float:
+        p = float(market_prob)
+        cat = str(tail_category or "").lower()
+        low = p < 0.10
+        mid = 0.10 <= p < 0.15
+
+        if cat in {"sports_match"}:
+            if low:
+                return self._clamp_prob(p / 0.75)
+            if mid:
+                return self._clamp_prob(p * 0.95)
+            return self._clamp_prob(p * 0.90)
+
+        if cat in {"geopolitical_event", "election", "regulatory"}:
+            if low:
+                return self._clamp_prob(p / 0.60)
+            if mid:
+                return self._clamp_prob(p / 0.65)
+            return self._clamp_prob(p / 0.75)
+
+        if cat in {"earnings_surprise", "company_valuation"}:
+            if low:
+                return self._clamp_prob(p / 0.60)
+            if mid:
+                return self._clamp_prob(p / 0.65)
+            return self._clamp_prob(p * 0.90)
+
+        # fallback for remaining categories
+        if low:
+            return self._clamp_prob(p / 0.60)
+        if mid:
+            return self._clamp_prob(p / 0.65)
+        return self._clamp_prob(p / 0.75)
+
+    def _deterministic_confidence_by_category(self, *, tail_category: str, market_prob: float, strategy: str) -> float:
+        cat = str(tail_category or "").lower()
+        if cat in {"price_target", "crypto_level"} and bool(self.settings.signal_tail_base_rate_external_enabled):
+            return 0.55
+        if cat in {"sports_match"}:
+            return 0.38 if market_prob >= 0.10 else 0.42
+        if cat in {"geopolitical_event", "election", "regulatory"}:
+            return 0.42
+        if cat in {"earnings_surprise", "company_valuation"}:
+            return 0.40
+        if strategy == "llm_evaluate":
+            return 0.38
+        return 0.40
 
     @staticmethod
     def _extract_crypto_target(title: str) -> tuple[str, str, float] | None:

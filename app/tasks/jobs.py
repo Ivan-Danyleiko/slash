@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from bisect import bisect_left
 
 import httpx
 from sqlalchemy import delete, exists, func, select
@@ -46,21 +47,73 @@ from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.telegram_product import TelegramProductService
 
+_STAGE17_CATEGORY_EMOJI = {
+    "price_target": "💰",
+    "crypto_level": "💰",
+    "sports_match": "🏆",
+    "geopolitical_event": "🌍",
+    "election": "🗳️",
+    "earnings_surprise": "📈",
+    "regulatory": "⚖️",
+    "company_valuation": "🏢",
+}
 
-def _send_stage17_telegram_message(settings, text: str) -> bool:
+
+def _as_obj_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _escape_markdown_v2(text: str) -> str:
+    out = str(text)
+    for ch in r"\_*[]()~`>#+-=|{}.!":
+        out = out.replace(ch, f"\\{ch}")
+    return out
+
+
+def _send_stage17_telegram_messages(settings, messages: list[str]) -> int:
     token = str(settings.telegram_bot_token or "").strip()
     chat_id = str(settings.telegram_chat_id or "").strip()
     if not token or not chat_id:
-        return False
+        return 0
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    sent = 0
     try:
         with httpx.Client(timeout=10.0) as client:
-            client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-            )
-        return True
+            for text in messages:
+                try:
+                    resp = client.post(
+                        url,
+                        json={"chat_id": chat_id, "text": str(text), "disable_web_page_preview": True},
+                    )
+                    if int(resp.status_code) == 200:
+                        sent += 1
+                except Exception:  # noqa: BLE001
+                    continue
     except Exception:  # noqa: BLE001
-        return False
+        return sent
+    return sent
+
+
+def _build_stage17_open_message(item: dict) -> str:
+    category = str(item.get("tail_category") or "")
+    emoji = _STAGE17_CATEGORY_EMOJI.get(category, "🔥")
+    koef = float(item.get("koef") or 0.0)
+    our_pct = 100.0 * float(item.get("our_prob") or 0.0)
+    mkt_pct = 100.0 * float(item.get("market_prob") or 0.0)
+    bet = float(item.get("notional_usd") or 0.0)
+    platform = str(item.get("platform") or "Unknown")
+    days_to_resolution = int(item.get("days_to_resolution") or 0)
+    return (
+        "🔥 STAGE17 OPEN\n"
+        f"{item.get('title')}\n"
+        f"{emoji} {category} · {platform} · {days_to_resolution} днів\n"
+        f"Koef x{koef:.2f} · our {our_pct:.1f}% vs mkt {mkt_pct:.1f}%\n"
+        f"bet=${bet:.2f}"
+    )
+
+
+def _build_stage17_win_message(item: dict) -> str:
+    return f"🎉 WIN x{item.get('koef')}: {item.get('title')} | +${item.get('profit_usd')}"
 
 
 def _cleanup_stale_running_jobs(
@@ -168,6 +221,29 @@ def _run_job(
         return {"status": "error", "error": _safe_error(exc)}
 
 
+def _run_job_with_status_from_result(
+    db: Session,
+    *,
+    job_name: str,
+    run_fn,
+    status_fn,
+    response_fn=None,
+) -> dict:
+    job = _start_job(db, job_name)
+    try:
+        payload = run_fn()
+        status = str(status_fn(payload)).upper()
+        if status not in {"SUCCESS", "FAILED"}:
+            status = "FAILED"
+        _finish_job(db, job, status, payload if isinstance(payload, dict) else {"payload": payload})
+        if callable(response_fn):
+            return response_fn(payload, status)
+        return {"status": "ok" if status == "SUCCESS" else "error", "result": payload}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
 def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
     return _run_job_with_guard(
         db,
@@ -232,8 +308,7 @@ def send_test_signal_job(db: Session) -> dict:
 
 
 def daily_digest_job(db: Session) -> dict:
-    job = _start_job(db, "daily_digest")
-    try:
+    def _run() -> dict:
         svc = TelegramProductService(db)
         users = list(db.scalars(select(User)))
         for user in users:
@@ -243,20 +318,16 @@ def daily_digest_job(db: Session) -> dict:
         for user in users:
             svc.daily_digest(user)
             sent += 1
-        _finish_job(db, job, "SUCCESS", {"digests_sent": sent})
-        return {"status": "ok", "result": {"digests_sent": sent}}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return {"digests_sent": sent}
+
+    return _run_job(db, job_name="daily_digest", run_fn=_run)
 
 
 def signal_push_job(db: Session) -> dict:
-    job = _start_job(db, "signal_push")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         if not settings.telegram_bot_token:
-            _finish_job(db, job, "SUCCESS", {"signals_prepared": 0, "signals_sent": 0, "note": "bot token missing"})
-            return {"status": "ok", "result": {"signals_prepared": 0, "signals_sent": 0}}
+            return {"signals_prepared": 0, "signals_sent": 0, "note": "bot token missing"}
 
         svc = TelegramProductService(db)
         users = list(db.scalars(select(User)))
@@ -268,87 +339,87 @@ def signal_push_job(db: Session) -> dict:
         def _skip(reason: str) -> None:
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
 
-        # Pre-load signal pool once — avoids 200-row query × N users
-        signal_pool = svc.load_signal_pool()
-
-        for user in users:
-            top = svc.top_ranked_signals(user=user, limit=5, pool=signal_pool)
-            top = [s for s in top if rank_score(s) > 0.1][:5]
-            for signal in top:
-                if not svc.can_send_signal(user, 1):
-                    break
-                market = db.get(Market, signal.market_id)
-                if not market:
-                    _skip("market_missing")
-                    continue
-                if _market_is_resolved(market, now=now):
-                    _skip("market_resolved_or_closed")
-                    continue
-                ex = signal.execution_analysis or {}
-                utility = float(ex.get("utility_score") or 0.0)
-                expected_edge = float(ex.get("expected_edge") or 0.0)
-                slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
-                if slippage_edge == 0.0 and expected_edge != 0.0:
-                    slippage_edge = expected_edge
-                min_edge_after_costs = 0.005
-                min_utility = max(float(settings.signal_top_min_utility_score), 0.01)
-                if slippage_edge <= min_edge_after_costs:
-                    _skip("edge_after_costs_too_low")
-                    continue
-                if utility <= min_utility:
-                    _skip("utility_too_low")
-                    continue
-                cost_impact = max(0.0, expected_edge - slippage_edge)
-                assumptions = str(ex.get("assumptions_version") or "n/a")
-                if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
-                    metric_label = "Recent move"
-                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
-                    if metric_value <= 0.0:
-                        _skip("recent_move_zero")
+        # Pre-load signal pool + market map once — avoids N+1 in user loops.
+        signal_pool, markets_by_id = svc.load_signal_pool_with_markets()
+        tg_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+        with httpx.Client(timeout=10.0) as client:
+            for user in users:
+                top = svc.top_ranked_signals(
+                    user=user,
+                    limit=5,
+                    pool=signal_pool,
+                    log_variant_event=False,
+                )
+                top = [s for s in top if rank_score(s) > 0.1][:5]
+                for signal in top:
+                    if not svc.can_send_signal(user, 1):
+                        break
+                    market = markets_by_id.get(int(signal.market_id or 0))
+                    if not market:
+                        _skip("market_missing")
                         continue
-                else:
-                    metric_label = "Divergence"
-                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
-                prepared += 1
-                def _e(s: str) -> str:
-                    for ch in r"\_*[]()~`>#+-=|{}.!":
-                        s = s.replace(ch, f"\\{ch}")
-                    return s
+                    if _market_is_resolved(market, now=now):
+                        _skip("market_resolved_or_closed")
+                        continue
+                    ex = signal.execution_analysis or {}
+                    utility = float(ex.get("utility_score") or 0.0)
+                    expected_edge = float(ex.get("expected_edge") or 0.0)
+                    slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
+                    if slippage_edge == 0.0 and expected_edge != 0.0:
+                        slippage_edge = expected_edge
+                    min_edge_after_costs = 0.005
+                    min_utility = max(float(settings.signal_top_min_utility_score), 0.01)
+                    if slippage_edge <= min_edge_after_costs:
+                        _skip("edge_after_costs_too_low")
+                        continue
+                    if utility <= min_utility:
+                        _skip("utility_too_low")
+                        continue
+                    cost_impact = max(0.0, expected_edge - slippage_edge)
+                    assumptions = str(ex.get("assumptions_version") or "n/a")
+                    if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
+                        metric_label = "Recent move"
+                        metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                        if metric_value <= 0.0:
+                            _skip("recent_move_zero")
+                            continue
+                    else:
+                        metric_label = "Divergence"
+                        metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                    prepared += 1
 
-                text = (
-                    f"🔥 *{_e(signal.signal_type.value)}*\n"
-                    f"{_e(signal.title)}\n"
-                    f"Confidence: {_e(f'{signal.confidence_score or 0:.2f}')}\n"
-                    f"{_e(metric_label)}: {_e(f'{metric_value:.1f}%')}\n"
-                    f"Utility \\(exec\\): {_e(f'{utility:.3f}')}\n"
-                    f"Edge after costs: {_e(f'{slippage_edge:.3f}')} \\(cost impact: {_e(f'{cost_impact:.3f}')}\\)\n"
-                    f"Execution assumptions: `{_e(assumptions)}`\n"
-                    f"_Disclaimer: {_e(settings.research_ethics_disclaimer_text)}_"
-                )
-                resp = httpx.post(
-                    f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
-                    json={
-                        "chat_id": user.telegram_user_id,
-                        "text": text,
-                        "parse_mode": "MarkdownV2",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=10.0,
-                )
-                if resp.status_code == 200:
-                    svc.record_signal_sent(user, signal)
-                    sent += 1
+                    text = (
+                        f"🔥 *{_escape_markdown_v2(signal.signal_type.value)}*\n"
+                        f"{_escape_markdown_v2(signal.title)}\n"
+                        f"Confidence: {_escape_markdown_v2(f'{signal.confidence_score or 0:.2f}')}\n"
+                        f"{_escape_markdown_v2(metric_label)}: {_escape_markdown_v2(f'{metric_value:.1f}%')}\n"
+                        f"Utility \\(exec\\): {_escape_markdown_v2(f'{utility:.3f}')}\n"
+                        f"Edge after costs: {_escape_markdown_v2(f'{slippage_edge:.3f}')} \\(cost impact: {_escape_markdown_v2(f'{cost_impact:.3f}')}\\)\n"
+                        f"Execution assumptions: `{_escape_markdown_v2(assumptions)}`\n"
+                        f"_Disclaimer: {_escape_markdown_v2(settings.research_ethics_disclaimer_text)}_"
+                    )
+                    resp = client.post(
+                        tg_url,
+                        json={
+                            "chat_id": user.telegram_user_id,
+                            "text": text,
+                            "parse_mode": "MarkdownV2",
+                            "disable_web_page_preview": True,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        svc.record_signal_sent(user, signal, commit=False)
+                        sent += 1
+        if sent > 0:
+            db.commit()
         result = {"signals_prepared": prepared, "signals_sent": sent, "skipped_by_reason": skipped_by_reason}
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return result
+
+    return _run_job(db, job_name="signal_push", run_fn=_run)
 
 
 def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
-    job = _start_job(db, "cleanup_old_signals")
-    try:
+    def _run() -> dict:
         cutoff = datetime.now(UTC).replace(microsecond=0) - timedelta(days=keep_days)
         has_stage7_ref = exists(
             select(Stage7AgentDecision.id).where(Stage7AgentDecision.signal_id == Signal.id)
@@ -371,32 +442,26 @@ def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
         )
         deleted = db.execute(stmt).rowcount or 0
         db.commit()
-        _finish_job(db, job, "SUCCESS", {"deleted": deleted})
-        return {"status": "ok", "result": {"deleted": deleted}}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return {"deleted": deleted}
+
+    return _run_job(db, job_name="cleanup_old_signals", run_fn=_run)
 
 
 def update_watchlists_job(db: Session) -> dict:
-    job = _start_job(db, "update_watchlists")
-    try:
+    def _run() -> dict:
         # Placeholder for future diff-based watchlist alerts.
-        _finish_job(db, job, "SUCCESS", {"watchlists_checked": True})
-        return {"status": "ok", "result": {"watchlists_checked": True}}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return {"watchlists_checked": True}
+
+    return _run_job(db, job_name="update_watchlists", run_fn=_run)
 
 
 def provider_contract_checks_job(db: Session) -> dict:
-    job = _start_job(db, "provider_contract_checks")
     settings = get_settings()
 
-    def _check(name: str, url: str, params: dict | None = None, headers: dict | None = None) -> dict:
+    def _check(client: httpx.Client, name: str, url: str, params: dict | None = None, headers: dict | None = None) -> dict:
         started = datetime.now(UTC)
         try:
-            resp = httpx.get(url, params=params, headers=headers or {}, timeout=15.0)
+            resp = client.get(url, params=params, headers=headers or {})
             latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
             ok = False
             detail = ""
@@ -428,66 +493,77 @@ def provider_contract_checks_job(db: Session) -> dict:
                 "detail": _safe_error(exc)[:200],
             }
 
-    checks: list[dict] = []
-    checks.append(
-        _check(
-            "MANIFOLD",
-            f"{settings.manifold_api_base_url}/markets",
-            params={"limit": 1},
-        )
-    )
-    checks.append(
-        _check(
-            "POLYMARKET",
-            f"{settings.polymarket_api_base_url}/markets",
-            params={"limit": 1},
-        )
-    )
-    if settings.kalshi_enabled:
-        checks.append(
-            _check(
-                "KALSHI",
-                f"{settings.kalshi_api_base_url}/markets",
-                params={"limit": 1, "status": "open"},
-                headers={"Authorization": f"Bearer {settings.kalshi_api_key}"} if settings.kalshi_api_key else None,
+    def _run() -> dict:
+        checks: list[dict] = []
+        with httpx.Client(timeout=15.0) as client:
+            checks.append(
+                _check(
+                    client,
+                    "MANIFOLD",
+                    f"{settings.manifold_api_base_url}/markets",
+                    params={"limit": 1},
+                )
             )
-        )
-    if settings.metaculus_api_token:
-        checks.append(
-            _check(
-                "METACULUS",
-                f"{settings.metaculus_api_base_url}/questions/",
-                params={"limit": 1},
-                headers={
-                    "Authorization": f"Token {settings.metaculus_api_token}",
-                    "Accept": "application/json",
-                    "User-Agent": settings.metaculus_user_agent,
-                },
+            checks.append(
+                _check(
+                    client,
+                    "POLYMARKET",
+                    f"{settings.polymarket_api_base_url}/markets",
+                    params={"limit": 1},
+                )
             )
-        )
-    else:
-        checks.append(
-            {
-                "provider": "METACULUS",
-                "ok": False,
-                "status_code": None,
-                "latency_ms": 0,
-                "url": f"{settings.metaculus_api_base_url}/questions/",
-                "detail": "METACULUS_API_TOKEN missing",
-            }
-        )
+            if settings.kalshi_enabled:
+                checks.append(
+                    _check(
+                        client,
+                        "KALSHI",
+                        f"{settings.kalshi_api_base_url}/markets",
+                        params={"limit": 1, "status": "open"},
+                        headers={"Authorization": f"Bearer {settings.kalshi_api_key}"} if settings.kalshi_api_key else None,
+                    )
+                )
+            if settings.metaculus_api_token:
+                checks.append(
+                    _check(
+                        client,
+                        "METACULUS",
+                        f"{settings.metaculus_api_base_url}/questions/",
+                        params={"limit": 1},
+                        headers={
+                            "Authorization": f"Token {settings.metaculus_api_token}",
+                            "Accept": "application/json",
+                            "User-Agent": settings.metaculus_user_agent,
+                        },
+                    )
+                )
+            else:
+                checks.append(
+                    {
+                        "provider": "METACULUS",
+                        "ok": False,
+                        "status_code": None,
+                        "latency_ms": 0,
+                        "url": f"{settings.metaculus_api_base_url}/questions/",
+                        "detail": "METACULUS_API_TOKEN missing",
+                    }
+                )
 
-    failed = [c for c in checks if not c.get("ok")]
-    summary = {
-        "checks_total": len(checks),
-        "checks_failed": len(failed),
-        "checks_passed": len(checks) - len(failed),
-        "providers": checks,
-        "has_blocking_issues": len(failed) > 0,
-    }
-    status = "SUCCESS" if not failed else "FAILED"
-    _finish_job(db, job, status, summary)
-    return {"status": ("ok" if not failed else "error"), "result": summary}
+        failed = [c for c in checks if not c.get("ok")]
+        return {
+            "checks_total": len(checks),
+            "checks_failed": len(failed),
+            "checks_passed": len(checks) - len(failed),
+            "providers": checks,
+            "has_blocking_issues": len(failed) > 0,
+        }
+
+    return _run_job_with_status_from_result(
+        db,
+        job_name="provider_contract_checks",
+        run_fn=_run,
+        status_fn=lambda summary: "FAILED" if bool(summary.get("has_blocking_issues")) else "SUCCESS",
+        response_fn=lambda summary, status: {"status": ("ok" if status == "SUCCESS" else "error"), "result": summary},
+    )
 
 
 def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200) -> dict:
@@ -673,29 +749,29 @@ def stage11_track_job(
     days_execution: int = 14,
     days_client: int = 7,
 ) -> dict:
-    job = _start_job(db, "stage11_track")
-    try:
+    def _run() -> dict:
         settings = get_settings()
-        report = build_stage11_track_report(
+        return build_stage11_track_report(
             db,
             settings=settings,
             days_execution=days_execution,
             days_client=days_client,
         )
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "final_decision": str(report.get("final_decision") or ""),
-                "orders_total": int((report.get("summary") or {}).get("orders_total") or 0),
-                "global_circuit_breaker_level": str((report.get("summary") or {}).get("global_circuit_breaker_level") or "OK"),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+
+    def _details(report: dict) -> dict:
+        summary = dict(report.get("summary") or {})
+        return {
+            "final_decision": str(report.get("final_decision") or ""),
+            "orders_total": int(summary.get("orders_total") or 0),
+            "global_circuit_breaker_level": str(summary.get("global_circuit_breaker_level") or "OK"),
+        }
+
+    return _run_job(
+        db,
+        job_name="stage11_track",
+        run_fn=_run,
+        details_fn=_details,
+    )
 
 
 def stage11_reconcile_job(
@@ -703,8 +779,7 @@ def stage11_reconcile_job(
     *,
     max_unknown_recovery_sec: int | None = None,
 ) -> dict:
-    job = _start_job(db, "stage11_reconcile")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         report = reconcile_orders(
             db,
@@ -716,21 +791,22 @@ def stage11_reconcile_job(
             ),
         )
         db.commit()
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "recovered": int(report.get("recovered") or 0),
-                "filled": int(report.get("filled") or 0),
-                "safe_cancelled": int(report.get("safe_cancelled") or 0),
-                "still_unknown": int(report.get("still_unknown") or 0),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return report
+
+    def _details(report: dict) -> dict:
+        return {
+            "recovered": int(report.get("recovered") or 0),
+            "filled": int(report.get("filled") or 0),
+            "safe_cancelled": int(report.get("safe_cancelled") or 0),
+            "still_unknown": int(report.get("still_unknown") or 0),
+        }
+
+    return _run_job(
+        db,
+        job_name="stage11_reconcile",
+        run_fn=_run,
+        details_fn=_details,
+    )
 
 
 def stage17_track_job(
@@ -738,8 +814,7 @@ def stage17_track_job(
     *,
     days: int = 60,
 ) -> dict:
-    job = _start_job(db, "stage17_track")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         report = build_stage17_tail_report(db, settings=settings, days=days, persist=True)
         tracking = record_stage5_experiment(
@@ -748,21 +823,31 @@ def stage17_track_job(
             metrics=extract_stage17_tail_report_metrics(report),
             tags={"stage": "stage17", "final_decision": str(report.get("final_decision") or "")},
         )
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "final_decision": str(report.get("final_decision") or ""),
-                "closed_positions": int((report.get("summary") or {}).get("closed_positions") or 0),
-                "payout_skew_ci_low_80": float((report.get("summary") or {}).get("payout_skew_ci_low_80") or 0.0),
-                "tracking_recorded": bool(tracking.get("recorded")),
-            },
-        )
+        return {"report": report, "tracking": tracking}
+
+    def _details(payload: dict) -> dict:
+        report = dict(payload.get("report") or {})
+        tracking = dict(payload.get("tracking") or {})
+        summary = dict(report.get("summary") or {})
+        return {
+            "final_decision": str(report.get("final_decision") or ""),
+            "closed_positions": int(summary.get("closed_positions") or 0),
+            "payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
+            "tracking_recorded": bool(tracking.get("recorded")),
+        }
+
+    def _response(payload: dict) -> dict:
+        report = dict(payload.get("report") or {})
+        tracking = dict(payload.get("tracking") or {})
         return {"status": "ok", "result": report, "tracking": tracking}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+
+    return _run_job(
+        db,
+        job_name="stage17_track",
+        run_fn=_run,
+        details_fn=_details,
+        response_fn=_response,
+    )
 
 
 def stage17_cycle_job(
@@ -770,31 +855,21 @@ def stage17_cycle_job(
     *,
     limit: int = 20,
 ) -> dict:
-    job = _start_job(db, "stage17_cycle")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         result = run_stage17_tail_cycle(db, settings=settings, limit=limit)
         opened_alerts = list(result.get("opened_alerts") or [])
         win_alerts = list(result.get("win_alerts") or [])
-        telegram_sent = 0
+        messages: list[str] = []
         for item in opened_alerts:
-            txt = (
-                "🔥 STAGE17 OPEN\n"
-                f"{item.get('title')}\n"
-                f"Koef x{item.get('koef')}\n"
-                f"our_prob={item.get('our_prob')} vs market={item.get('market_prob')}\n"
-                f"bet=${item.get('notional_usd')}"
-            )
-            telegram_sent += 1 if _send_stage17_telegram_message(settings, txt) else 0
+            messages.append(_build_stage17_open_message(item))
         for item in win_alerts:
-            txt = f"🎉 WIN x{item.get('koef')}: {item.get('title')} | +${item.get('profit_usd')}"
-            telegram_sent += 1 if _send_stage17_telegram_message(settings, txt) else 0
+            messages.append(_build_stage17_win_message(item))
+        telegram_sent = _send_stage17_telegram_messages(settings, messages)
         result["telegram_sent"] = int(telegram_sent)
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return result
+
+    return _run_job(db, job_name="stage17_cycle", run_fn=_run)
 
 
 def stage17_batch_job(
@@ -803,8 +878,7 @@ def stage17_batch_job(
     days: int = 60,
     cycle_limit: int = 20,
 ) -> dict:
-    job = _start_job(db, "stage17_batch")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         report = build_stage17_batch_report(
             db,
@@ -821,28 +895,29 @@ def stage17_batch_job(
             f"avg_koef={summary.get('avg_koef')}\n"
             f"final={summary.get('final_decision')}"
         )
-        telegram_sent = _send_stage17_telegram_message(settings, digest_text)
-        report["telegram_sent"] = bool(telegram_sent)
-        _finish_job(
-            db,
-            job,
-            "SUCCESS",
-            {
-                "final_decision": str(((report.get("reports") or {}).get("stage17_tail_report") or {}).get("final_decision") or ""),
-                "closed_positions": int(summary.get("closed_positions") or 0),
-                "payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
-                "telegram_sent": bool(telegram_sent),
-            },
-        )
-        return {"status": "ok", "result": report}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        telegram_sent = _send_stage17_telegram_messages(settings, [digest_text])
+        report["telegram_sent"] = bool(telegram_sent > 0)
+        return report
+
+    def _details(report: dict) -> dict:
+        summary = ((report.get("reports") or {}).get("stage17_tail_report") or {}).get("summary") or {}
+        return {
+            "final_decision": str(((report.get("reports") or {}).get("stage17_tail_report") or {}).get("final_decision") or ""),
+            "closed_positions": int(summary.get("closed_positions") or 0),
+            "payout_skew_ci_low_80": float(summary.get("payout_skew_ci_low_80") or 0.0),
+            "telegram_sent": bool(report.get("telegram_sent")),
+        }
+
+    return _run_job(
+        db,
+        job_name="stage17_batch",
+        run_fn=_run,
+        details_fn=_details,
+    )
 
 
 def quality_snapshot_job(db: Session) -> dict:
-    job = _start_job(db, "quality_snapshot")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         now = datetime.now(UTC)
         day = now.date()
@@ -957,11 +1032,9 @@ def quality_snapshot_job(db: Session) -> dict:
             "simulated_edge_p10": round(simulated_edge_p10, 4),
             "top5_utility_daily": round(top5_utility_daily, 4),
         }
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return result
+
+    return _run_job(db, job_name="quality_snapshot", run_fn=_run)
 
 
 def _as_utc(ts: datetime | None) -> datetime | None:
@@ -973,7 +1046,7 @@ def _as_utc(ts: datetime | None) -> datetime | None:
 
 
 def _market_is_resolved(market: Market, *, now: datetime) -> bool:
-    payload = market.source_payload or {}
+    payload = _as_obj_dict(market.source_payload)
     status = (market.status or "").strip().lower()
     # Some providers (notably Kalshi) can be CLOSED before final settlement outcome is available.
     if "closed" in status:
@@ -983,7 +1056,8 @@ def _market_is_resolved(market: Market, *, now: datetime) -> bool:
         )
         if settlement_timer is not None and not has_outcome:
             return False
-    if _as_utc(market.resolution_time) and _as_utc(market.resolution_time) <= now:
+    resolution_time_utc = _as_utc(market.resolution_time)
+    if resolution_time_utc and resolution_time_utc <= now:
         return True
     if any(token in status for token in ("resolved", "settled", "final", "ended")):
         return True
@@ -997,7 +1071,7 @@ def _market_is_resolved(market: Market, *, now: datetime) -> bool:
 
 
 def _extract_resolved_probability(market: Market) -> float | None:
-    payload = market.source_payload or {}
+    payload = _as_obj_dict(market.source_payload)
     for key in ("resolutionProbability", "resolved_probability", "finalProbability"):
         value = payload.get(key)
         if isinstance(value, (float, int)):
@@ -1016,7 +1090,7 @@ def _extract_resolved_probability(market: Market) -> float | None:
 
 
 def _extract_resolved_outcome(market: Market, resolved_probability: float | None) -> str:
-    payload = market.source_payload or {}
+    payload = _as_obj_dict(market.source_payload)
     for key in ("isVoid", "voided", "isCancelled", "cancelled", "isNull", "nullified"):
         value = payload.get(key)
         if value in (True, 1, "1", "true", "yes", "YES"):
@@ -1037,38 +1111,62 @@ def _normalize_signal_direction(value: str | None) -> str | None:
     return None
 
 
-def _label_signal_history_horizon(db: Session, *, hours: int, field_name: str) -> dict:
-    job_name = f"label_signal_history_{hours}h"
-    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=40)
-    if _is_recent_running_job(db, job_name=job_name, stale_minutes=40):
+def _run_guarded_label_job(
+    db: Session,
+    *,
+    job_name: str,
+    stale_minutes: int,
+    run_fn,
+    result_to_status_fn=None,
+) -> dict:
+    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=stale_minutes)
+    if _is_recent_running_job(db, job_name=job_name, stale_minutes=stale_minutes):
         return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, job_name)
     try:
+        result = run_fn()
+        status = "SUCCESS"
+        error_message: str | None = None
+        if callable(result_to_status_fn):
+            status, error_message = result_to_status_fn(result)
+        _finish_job(db, job, status, result)
+        if status == "SUCCESS":
+            return {"status": "ok", "result": result}
+        return {"status": "error", "error": error_message or "job_failed", "result": result}
+    except Exception as exc:  # noqa: BLE001
+        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
+        return {"status": "error", "error": _safe_error(exc)}
+
+
+def _label_signal_history_horizon(db: Session, *, hours: int) -> dict:
+    job_name = f"label_signal_history_{hours}h"
+    def _run() -> dict:
         horizon = f"{hours}h"
-        result = label_signal_history_from_snapshots(
+        return label_signal_history_from_snapshots(
             db,
             horizon=horizon,
             batch_size=5000,
             max_snapshot_lag_hours=max(0.5, float(get_settings().signal_labeling_horizon_lag_hours)),
             dry_run=False,
         )
-        if result.get("status") == "ok":
-            _finish_job(db, job, "SUCCESS", result)
-            return {"status": "ok", "result": result}
-        _finish_job(db, job, "FAILED", result)
-        return {"status": "error", "error": result.get("error", "labeling_failed"), "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+
+    def _status_from_result(result: dict) -> tuple[str, str | None]:
+        if str(result.get("status") or "").lower() == "ok":
+            return "SUCCESS", None
+        return "FAILED", str(result.get("error") or "labeling_failed")
+
+    return _run_guarded_label_job(
+        db,
+        job_name=job_name,
+        stale_minutes=40,
+        run_fn=_run,
+        result_to_status_fn=_status_from_result,
+    )
 
 
 def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, batch_size: int = 2000) -> dict:
     job_name = f"label_signal_history_{minutes}m"
-    _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=40)
-    if _is_recent_running_job(db, job_name=job_name, stale_minutes=40):
-        return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
-    job = _start_job(db, job_name)
-    try:
+    def _run() -> dict:
         now = datetime.now(UTC)
         target = now - timedelta(minutes=minutes)
         # Only look back 7 days — older rows will never get a matching snapshot
@@ -1086,15 +1184,48 @@ def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, b
                 .limit(batch_size)
             )
         )
+        market_ids = sorted({int(r.market_id) for r in rows if r.market_id is not None})
+        markets_by_id: dict[int, Market] = {}
+        if market_ids:
+            markets_by_id = {
+                int(m.id): m
+                for m in db.scalars(select(Market).where(Market.id.in_(market_ids)))
+            }
+        targets: list[datetime] = []
+        for row in rows:
+            ts = _as_utc(row.timestamp)
+            if ts is not None:
+                targets.append(ts + timedelta(minutes=minutes))
+        snapshots_by_market: dict[int, dict[str, list]] = {}
+        if market_ids and targets:
+            min_target = min(targets)
+            max_target = max(targets) + timedelta(minutes=tolerance)
+            snap_rows = list(
+                db.scalars(
+                    select(MarketSnapshot)
+                    .where(MarketSnapshot.market_id.in_(market_ids))
+                    .where(MarketSnapshot.fetched_at >= min_target)
+                    .where(MarketSnapshot.fetched_at <= max_target)
+                    .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.fetched_at.asc())
+                )
+            )
+            for snap in snap_rows:
+                sid = int(snap.market_id)
+                fetched = _as_utc(snap.fetched_at)
+                if fetched is None:
+                    continue
+                buf = snapshots_by_market.setdefault(sid, {"times": [], "snaps": []})
+                buf["times"].append(fetched)
+                buf["snaps"].append(snap)
 
         updated = 0
         skipped_market_missing = 0
         skipped_snapshot_missing = 0
         for row in rows:
-            payload = dict(row.simulated_trade or {})
+            payload = dict(_as_obj_dict(row.simulated_trade))
             if payload.get(key_name) is not None:
                 continue
-            market = db.get(Market, row.market_id)
+            market = markets_by_id.get(int(row.market_id or 0))
             if not market:
                 row.missing_label_reason = "market_missing"
                 skipped_market_missing += 1
@@ -1106,16 +1237,15 @@ def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, b
                 skipped_snapshot_missing += 1
                 continue
             target_ts = target_ts + timedelta(minutes=minutes)
-            snap = db.scalar(
-                select(MarketSnapshot)
-                .where(
-                    MarketSnapshot.market_id == row.market_id,
-                    MarketSnapshot.fetched_at >= target_ts,
-                    MarketSnapshot.fetched_at <= target_ts + timedelta(minutes=tolerance),
-                )
-                .order_by(MarketSnapshot.fetched_at.asc())
-                .limit(1)
-            )
+            snap = None
+            window_end = target_ts + timedelta(minutes=tolerance)
+            market_snaps = snapshots_by_market.get(int(row.market_id or 0))
+            if market_snaps is not None:
+                times: list[datetime] = market_snaps["times"]
+                snaps: list[MarketSnapshot] = market_snaps["snaps"]
+                idx = bisect_left(times, target_ts)
+                if idx < len(times) and times[idx] <= window_end:
+                    snap = snaps[idx]
             if not snap or snap.probability_yes is None:
                 row.missing_label_reason = f"snapshot_{minutes}m_missing"
                 skipped_snapshot_missing += 1
@@ -1138,11 +1268,14 @@ def _label_signal_history_subhour(db: Session, *, minutes: int, key_name: str, b
             "store": "signal_history.simulated_trade",
             "key": key_name,
         }
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return result
+
+    return _run_guarded_label_job(
+        db,
+        job_name=job_name,
+        stale_minutes=40,
+        run_fn=_run,
+    )
 
 
 def label_signal_history_15m_job(db: Session) -> dict:
@@ -1154,15 +1287,15 @@ def label_signal_history_30m_job(db: Session) -> dict:
 
 
 def label_signal_history_1h_job(db: Session) -> dict:
-    return _label_signal_history_horizon(db, hours=1, field_name="probability_after_1h")
+    return _label_signal_history_horizon(db, hours=1)
 
 
 def label_signal_history_6h_job(db: Session) -> dict:
-    return _label_signal_history_horizon(db, hours=6, field_name="probability_after_6h")
+    return _label_signal_history_horizon(db, hours=6)
 
 
 def label_signal_history_24h_job(db: Session) -> dict:
-    return _label_signal_history_horizon(db, hours=24, field_name="probability_after_24h")
+    return _label_signal_history_horizon(db, hours=24)
 
 
 def label_signal_history_job(
@@ -1172,8 +1305,7 @@ def label_signal_history_job(
     max_snapshot_lag_hours: float = 2.0,
     dry_run: bool = False,
 ) -> dict:
-    job = _start_job(db, "label_signal_history")
-    try:
+    def _run() -> dict:
         results: dict[str, dict] = {}
         for horizon in ("1h", "6h", "24h"):
             results[horizon] = label_signal_history_from_snapshots(
@@ -1191,30 +1323,47 @@ def label_signal_history_job(
             "candidates_total": int(sum(int((results.get(h) or {}).get("candidates") or 0) for h in results)),
             "by_horizon": results,
         }
-        _finish_job(db, job, "SUCCESS", payload)
-        return {"status": "ok", "result": payload}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return payload
+
+    return _run_job(db, job_name="label_signal_history", run_fn=_run)
 
 
-def label_signal_history_resolution_job(db: Session) -> dict:
-    job = _start_job(db, "label_signal_history_resolution")
-    try:
+def label_signal_history_resolution_job(
+    db: Session,
+    *,
+    batch_size: int = 5000,
+) -> dict:
+    def _run() -> dict:
         now = datetime.now(UTC)
+        limit_n = max(1, int(batch_size))
         rows = list(
             db.scalars(
                 select(SignalHistory)
                 .where(SignalHistory.resolution_checked_at.is_(None))
                 .order_by(SignalHistory.timestamp.asc())
+                .limit(limit_n)
             )
         )
+        market_ids = sorted({int(r.market_id) for r in rows if r.market_id is not None})
+        signal_ids = sorted({int(r.signal_id) for r in rows if r.signal_id is not None})
+        markets_by_id: dict[int, Market] = {}
+        if market_ids:
+            markets_by_id = {
+                int(m.id): m
+                for m in db.scalars(select(Market).where(Market.id.in_(market_ids)))
+            }
+        signals_by_id: dict[int, Signal] = {}
+        if signal_ids:
+            signals_by_id = {
+                int(s.id): s
+                for s in db.scalars(select(Signal).where(Signal.id.in_(signal_ids)))
+            }
         checked = 0
         updated = 0
         skipped_not_resolved = 0
         skipped_no_probability = 0
         for row in rows:
-            market = db.get(Market, row.market_id)
+            market = markets_by_id.get(int(row.market_id or 0))
             if not market:
                 row.missing_label_reason = "market_missing"
                 continue
@@ -1232,7 +1381,7 @@ def label_signal_history_resolution_job(db: Session) -> dict:
 
             row.resolved_probability = float(resolved_probability)
             row.resolved_outcome = _extract_resolved_outcome(market, resolved_probability)
-            payload = market.source_payload or {}
+            payload = _as_obj_dict(market.source_payload)
             is_disputed = bool(payload.get("disputed")) or bool(payload.get("isDisputed"))
             if is_disputed:
                 row.resolved_success = None
@@ -1242,7 +1391,7 @@ def label_signal_history_resolution_job(db: Session) -> dict:
                 continue
             direction = _normalize_signal_direction(row.signal_direction)
             if direction is None and row.signal_id:
-                signal = db.get(Signal, row.signal_id)
+                signal = signals_by_id.get(int(row.signal_id))
                 if signal:
                     direction = _normalize_signal_direction(signal.signal_direction)
                     row.signal_direction = direction
@@ -1266,22 +1415,20 @@ def label_signal_history_resolution_job(db: Session) -> dict:
 
         db.commit()
         result = {
+            "batch_size": limit_n,
             "candidates": len(rows),
             "checked_resolved": checked,
             "updated": updated,
             "skipped_not_resolved": skipped_not_resolved,
             "skipped_no_probability": skipped_no_probability,
         }
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return result
+
+    return _run_job(db, job_name="label_signal_history_resolution", run_fn=_run)
 
 
 def cleanup_signal_history_job(db: Session) -> dict:
-    job = _start_job(db, "cleanup_signal_history")
-    try:
+    def _run() -> dict:
         settings = get_settings()
         cutoff = datetime.now(UTC) - timedelta(days=max(1, settings.signal_history_retention_days))
         deleted = (
@@ -1291,9 +1438,6 @@ def cleanup_signal_history_job(db: Session) -> dict:
             or 0
         )
         db.commit()
-        result = {"deleted": int(deleted), "retention_days": settings.signal_history_retention_days}
-        _finish_job(db, job, "SUCCESS", result)
-        return {"status": "ok", "result": result}
-    except Exception as exc:  # noqa: BLE001
-        _finish_job(db, job, "FAILED", {"error": _safe_error(exc)})
-        return {"status": "error", "error": _safe_error(exc)}
+        return {"deleted": int(deleted), "retention_days": settings.signal_history_retention_days}
+
+    return _run_job(db, job_name="cleanup_signal_history", run_fn=_run)

@@ -17,7 +17,6 @@ _AMBIGUITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\beditorial decision\b", re.IGNORECASE),
     re.compile(r"\bteam decision\b", re.IGNORECASE),
     re.compile(r"\bsubjective\b", re.IGNORECASE),
-    re.compile(r"\bsubject to\b", re.IGNORECASE),
     re.compile(r"\bif deemed\b", re.IGNORECASE),
     re.compile(r"\bif unavailable\b", re.IGNORECASE),
     re.compile(r"\bmay be resolved by\b", re.IGNORECASE),
@@ -48,6 +47,23 @@ _TAIL_CATEGORIES: dict[str, dict[str, Any]] = {
             "eth $",
             "solana $",
             "sol $",
+            "all-time high",
+            "all time high",
+            "new ath",
+            "defi tvl",
+            "total value locked",
+            "xrp",
+            "ripple",
+            "cardano",
+            "ada",
+            "doge",
+            "dogecoin",
+            "avalanche",
+            "avax",
+            "chainlink",
+            "link",
+            "polkadot",
+            "dot",
         ),
         "strategy": "bet_yes_underpriced",
     },
@@ -57,6 +73,20 @@ _TAIL_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "sports_match": {
         "keywords": (
+            "nba",
+            "nhl",
+            "nfl",
+            "mlb",
+            "ncaa",
+            "mls",
+            "fifa",
+            "uefa",
+            "premier league",
+            "champions league",
+            "stanley cup",
+            "playoff",
+            "playoffs",
+            "world cup",
             "win the championship",
             "win the world series",
             "win the super bowl",
@@ -69,8 +99,38 @@ _TAIL_CATEGORIES: dict[str, dict[str, Any]] = {
             "win the title",
             "make the playoffs",
             "reach the final",
+            "make it to the finals",
+            "win the gold",
+            "olympic gold",
+            "gold medal",
         ),
         "strategy": "bet_yes_underpriced",
+    },
+    "election": {
+        "keywords": (
+            "win the election",
+            "wins the election",
+            "win the presidency",
+            "wins presidency",
+            "win the primary",
+            "win the senate",
+            "win the house",
+            "elected president",
+            "elected senator",
+            "elected governor",
+            "presidential election",
+            "parliamentary election",
+            "general election",
+            "midterm election",
+            "become president",
+            "become prime minister",
+            "win the vote",
+            "referendum",
+            "ballot",
+            "senate race",
+            "governor race",
+        ),
+        "strategy": "llm_evaluate",
     },
     "geopolitical_event": {
         "keywords": (
@@ -126,6 +186,30 @@ _TAIL_CATEGORIES: dict[str, dict[str, Any]] = {
         ),
         "strategy": "llm_evaluate",
     },
+    "company_valuation": {
+        "keywords": (
+            "ipo",
+            "go public",
+            "goes public",
+            "initial public offering",
+            "acquisition",
+            "acquire",
+            "be acquired",
+            "merger",
+            "takeover",
+            "unicorn",
+            "billion valuation",
+            "listed on",
+            "stock market debut",
+            "spin-off",
+            "spinoff",
+            "chapter 11",
+            "file for bankruptcy",
+            "market cap",
+            "series d",
+        ),
+        "strategy": "bet_yes_underpriced",
+    },
 }
 
 
@@ -173,12 +257,18 @@ def classify_tail_event(market: Market, *, settings: Settings) -> dict[str, Any]
             "reason_codes": ambiguity,
         }
 
-    title = str(market.title or "").lower()
+    searchable_text = " ".join(
+        [
+            str(market.title or ""),
+            str(market.description or ""),
+            str(market.rules_text or ""),
+        ]
+    ).lower()
     category = None
     strategy = None
     for cat, cfg in _TAIL_CATEGORIES.items():
         for kw in cfg["keywords"]:
-            if kw in title:
+            if kw in searchable_text:
                 category = cat
                 strategy = str(cfg["strategy"])
                 break

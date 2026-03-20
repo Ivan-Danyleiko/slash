@@ -78,3 +78,33 @@ def test_stage17_crypto_base_rate_fallback_when_external_disabled() -> None:
     est = BaseRateEstimator(db=db, settings=settings)
     out = est.estimate(market, tail_category="crypto_level", strategy="llm_evaluate")
     assert str(out.get("source") or "").startswith("deterministic_")
+
+
+def test_stage17_base_rate_category_rules_for_sports_and_geopolitical() -> None:
+    db = _mk_db()
+    platform = Platform(name="POLYMARKET")
+    db.add(platform)
+    db.flush()
+    sports_market = Market(
+        platform_id=platform.id,
+        external_market_id="m-sports-1",
+        title="Will Team A win the NHL Stanley Cup?",
+        probability_yes=0.20,
+    )
+    geo_market = Market(
+        platform_id=platform.id,
+        external_market_id="m-geo-1",
+        title="Will country X invade country Y by year end?",
+        probability_yes=0.20,
+    )
+    db.add_all([sports_market, geo_market])
+    db.commit()
+
+    settings = SignalEngine(db).settings.model_copy(update={"signal_tail_base_rate_external_enabled": False})
+    est = BaseRateEstimator(db=db, settings=settings)
+
+    sports_out = est.estimate(sports_market, tail_category="sports_match", strategy="bet_yes_underpriced")
+    geo_out = est.estimate(geo_market, tail_category="geopolitical_event", strategy="llm_evaluate")
+
+    assert float(sports_out.get("our_prob") or 0.0) < 0.20
+    assert float(geo_out.get("our_prob") or 0.0) > 0.20

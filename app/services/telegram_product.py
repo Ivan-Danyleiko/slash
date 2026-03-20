@@ -114,6 +114,11 @@ class TelegramProductService:
 
     def load_signal_pool(self, limit: int = 200) -> list[Signal]:
         """Pre-load actionable signals once; pass the result to top_ranked_signals as `pool`."""
+        pool, _ = self.load_signal_pool_with_markets(limit=limit)
+        return pool
+
+    def load_signal_pool_with_markets(self, limit: int = 200) -> tuple[list[Signal], dict[int, Market]]:
+        """Pre-load actionable signals once with market map for callers that need both."""
         now = datetime.now(UTC)
         rows = list(
             self.db.execute(
@@ -123,9 +128,23 @@ class TelegramProductService:
                 .limit(limit)
             )
         )
-        return [signal for signal, market in rows if self._market_is_actionable(market, now=now)]
+        pool: list[Signal] = []
+        markets_by_id: dict[int, Market] = {}
+        for signal, market in rows:
+            if not self._market_is_actionable(market, now=now):
+                continue
+            pool.append(signal)
+            markets_by_id[int(market.id)] = market
+        return pool, markets_by_id
 
-    def top_ranked_signals(self, user: User, limit: int = 5, pool: list[Signal] | None = None) -> list[Signal]:
+    def top_ranked_signals(
+        self,
+        user: User,
+        limit: int = 5,
+        pool: list[Signal] | None = None,
+        *,
+        log_variant_event: bool = True,
+    ) -> list[Signal]:
         # If a pre-loaded pool is provided, skip the DB query (avoids N+1 in push jobs)
         if pool is None:
             pool = self.load_signal_pool()
@@ -137,7 +156,7 @@ class TelegramProductService:
             top = sorted(filtered, key=rank_score, reverse=True)[:max_allowed]
         else:
             top = select_top_signals(filtered, limit=max_allowed, settings=settings)
-        if variant:
+        if variant and log_variant_event:
             self.db.add(
                 UserEvent(
                     user_id=user.id,
@@ -217,7 +236,7 @@ class TelegramProductService:
         limit = PLAN_LIMITS[user.access_level]["signals"]
         return (user.signals_sent_today + requested) <= limit
 
-    def record_signal_sent(self, user: User, signal: Signal) -> None:
+    def record_signal_sent(self, user: User, signal: Signal, *, commit: bool = True) -> None:
         user.signals_sent_today += 1
         variant = get_ab_variant_for_user(user_id=user.id)
         payload = {"variant": variant} if variant else None
@@ -229,7 +248,8 @@ class TelegramProductService:
                 payload_json=payload,
             )
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
 
     # ------------------------------------------------------------------
     # Dry-run portfolio formatting

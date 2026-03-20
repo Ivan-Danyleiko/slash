@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import math
 import random
 from statistics import median
@@ -12,6 +12,12 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.models.models import Stage17TailPosition, Stage17TailReport
 from app.services.signals.tail_circuit_breaker import check_tail_circuit_breaker
+
+
+def _utc_ref(ts: datetime | None) -> datetime | None:
+    if ts is None:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
 
 
 def _percentile(sorted_values: list[float], p: float) -> float:
@@ -87,31 +93,47 @@ def _max_concurrent_positions(rows: list[Stage17TailPosition]) -> int:
     return int(max(0, peak))
 
 
-def _group_closed_stats(rows: list[Stage17TailPosition], key_fn) -> dict[str, Any]:
-    by: dict[str, dict[str, Any]] = {}
+def _group_closed_stats_dual(rows: list[Stage17TailPosition]) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_category: dict[str, dict[str, Any]] = {}
+    by_variation: dict[str, dict[str, Any]] = {}
+
+    def _ensure(bucket: dict[str, dict[str, Any]], key: str) -> dict[str, Any]:
+        return bucket.setdefault(key, {"closed": 0, "wins": 0, "pnl_usd": 0.0})
+
     for row in rows:
-        key = str(key_fn(row) or "unknown")
-        b = by.setdefault(key, {"closed": 0, "wins": 0, "pnl_usd": 0.0})
-        b["closed"] += 1
         pnl = float(row.realized_pnl_usd or 0.0)
-        if pnl > 0:
-            b["wins"] += 1
-        b["pnl_usd"] += pnl
-    for k, val in by.items():
-        closed = int(val["closed"] or 0)
-        wins = int(val["wins"] or 0)
-        val["win_rate_tail"] = (wins / closed) if closed > 0 else 0.0
-        val["pnl_usd"] = float(val["pnl_usd"] or 0.0)
-        by[k] = val
-    return by
+        won = pnl > 0.0
+        cat_key = str(row.tail_category or "unknown")
+        var_key = str(row.tail_variation or "unknown")
+        cat = _ensure(by_category, cat_key)
+        var = _ensure(by_variation, var_key)
+        for target in (cat, var):
+            target["closed"] += 1
+            if won:
+                target["wins"] += 1
+            target["pnl_usd"] += pnl
+
+    for bucket in (by_category, by_variation):
+        for key, val in bucket.items():
+            closed = int(val["closed"] or 0)
+            wins = int(val["wins"] or 0)
+            val["win_rate_tail"] = (wins / closed) if closed > 0 else 0.0
+            val["pnl_usd"] = float(val["pnl_usd"] or 0.0)
+            bucket[key] = val
+
+    return by_category, by_variation
 
 
-def _by_category(rows: list[Stage17TailPosition]) -> dict[str, Any]:
-    return _group_closed_stats(rows, key_fn=lambda row: row.tail_category)
-
-
-def _by_variation(rows: list[Stage17TailPosition]) -> dict[str, Any]:
-    return _group_closed_stats(rows, key_fn=lambda row: row.tail_variation)
+def _average_positive_field(rows: list[Stage17TailPosition], field: str) -> float:
+    vals: list[float] = []
+    for row in rows:
+        raw = getattr(row, field, None)
+        v = float(raw or 0.0)
+        if v > 0.0:
+            vals.append(v)
+    if not vals:
+        return 0.0
+    return float(sum(vals)) / float(len(vals))
 
 
 def build_stage17_tail_report(
@@ -132,7 +154,12 @@ def build_stage17_tail_report(
     )
     closed = [r for r in rows if str(r.status or "").upper() == "CLOSED" and r.closed_at is not None]
     open_rows = [r for r in rows if str(r.status or "").upper() == "OPEN"]
-    opened_last_24h = [r for r in rows if r.opened_at is not None and (r.opened_at if r.opened_at.tzinfo else r.opened_at.replace(tzinfo=UTC)) >= (now - timedelta(hours=24))]
+    opened_last_24h = []
+    opened_cutoff = now - timedelta(hours=24)
+    for r in rows:
+        opened_at = _utc_ref(r.opened_at)
+        if opened_at is not None and opened_at >= opened_cutoff:
+            opened_last_24h.append(r)
     closed_pnls = [float(r.realized_pnl_usd or 0.0) for r in closed]
     closed_count = len(closed)
     wins_count = len([x for x in closed_pnls if x > 0.0])
@@ -148,8 +175,10 @@ def build_stage17_tail_report(
     for r in closed:
         if r.opened_at is None or r.closed_at is None:
             continue
-        open_ts = r.opened_at if r.opened_at.tzinfo else r.opened_at.replace(tzinfo=UTC)
-        close_ts = r.closed_at if r.closed_at.tzinfo else r.closed_at.replace(tzinfo=UTC)
+        open_ts = _utc_ref(r.opened_at)
+        close_ts = _utc_ref(r.closed_at)
+        if open_ts is None or close_ts is None:
+            continue
         durations_h.append(max(0.0, (close_ts - open_ts).total_seconds() / 3600.0))
     median_ttr_h = float(median(durations_h)) if durations_h else None
     median_ttr_days = (median_ttr_h / 24.0) if median_ttr_h is not None else None
@@ -163,14 +192,8 @@ def build_stage17_tail_report(
         win_multipliers.append(1.0 + (pnl / notional))
     avg_win_multiplier = float(sum(win_multipliers) / len(win_multipliers)) if win_multipliers else None
     best_win_koef = max([float(r.koef_entry or 0.0) for r in closed if float(r.realized_pnl_usd or 0.0) > 0.0], default=0.0)
-    avg_koef = (
-        float(sum(float(r.koef_entry or 0.0) for r in rows if (r.koef_entry or 0.0) > 0.0))
-        / max(1, len([1 for r in rows if (r.koef_entry or 0.0) > 0.0]))
-    )
-    avg_days_to_res = (
-        float(sum(float(r.days_to_resolution_entry or 0.0) for r in rows if (r.days_to_resolution_entry or 0.0) > 0.0))
-        / max(1, len([1 for r in rows if (r.days_to_resolution_entry or 0.0) > 0.0]))
-    )
+    avg_koef = _average_positive_field(rows, "koef_entry")
+    avg_days_to_res = _average_positive_field(rows, "days_to_resolution_entry")
     total_notional_closed = float(sum(float(r.notional_usd or 0.0) for r in closed))
     roi_total = (float(sum(closed_pnls)) / total_notional_closed) if total_notional_closed > 0 else 0.0
 
@@ -232,7 +255,7 @@ def build_stage17_tail_report(
         final_decision = "NO_GO"
         action = "tune_tail_filters_and_base_rate"
 
-    by_variation = _by_variation(closed)
+    by_category, by_variation = _group_closed_stats_dual(closed)
     summary = {
         "days": int(days),
         "rows_total": len(rows),
@@ -274,8 +297,6 @@ def build_stage17_tail_report(
         "action": action,
         "by_variation": by_variation,
     }
-    by_category = _by_category(closed)
-
     if persist:
         report_day = now.date()
         row = db.scalar(select(Stage17TailReport).where(Stage17TailReport.report_date == report_day).limit(1))

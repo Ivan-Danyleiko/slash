@@ -10,15 +10,15 @@ from app.core.config import Settings
 from app.models.enums import SignalType
 from app.models.models import JobRun, Market, Signal, Stage17TailFill, Stage17TailPosition
 from app.services.agent_stage7.tail_stage7 import evaluate_tail_stage7
-from app.services.signals.tail_circuit_breaker import can_open_tail_by_category, check_tail_circuit_breaker
+from app.services.signals.tail_circuit_breaker import _category_limit_map, check_tail_circuit_breaker
 
 
-def _is_market_resolved(market: Market) -> bool:
-    now = datetime.now(UTC)
+def _is_market_resolved(market: Market, *, now: datetime | None = None) -> bool:
+    now_ref = now or datetime.now(UTC)
     rt = market.resolution_time
     if rt is not None:
         ref = rt.astimezone(UTC) if rt.tzinfo else rt.replace(tzinfo=UTC)
-        if ref <= now:
+        if ref <= now_ref:
             return True
     status = str(market.status or "").lower()
     if any(k in status for k in ("resolved", "closed", "settled", "final", "ended")):
@@ -70,6 +70,31 @@ def _acquire_tail_cycle_lock_if_supported(db: Session) -> bool:
 def _side_price(market: Market, direction: str) -> float:
     p_yes = min(0.999, max(0.001, float(market.probability_yes or 0.5)))
     return p_yes if direction == "YES" else (1.0 - p_yes)
+
+
+def _position_shares(row: Stage17TailPosition) -> float:
+    entry = float(row.entry_price or 0.0)
+    notional = float(row.notional_usd or 0.0)
+    if entry <= 0.0 or notional <= 0.0:
+        return 0.0
+    return notional / entry
+
+
+def _position_pnl_from_mark(row: Stage17TailPosition, mark: float) -> float:
+    shares = _position_shares(row)
+    if shares <= 0.0:
+        return 0.0
+    return (shares * float(mark)) - float(row.notional_usd or 0.0)
+
+
+def _market_platform_label(market: Market) -> str:
+    if isinstance(market.source_payload, dict):
+        p = str(market.source_payload.get("platform") or "").strip()
+        if p:
+            return p
+    if getattr(market, "platform", None) is not None:
+        return str(market.platform.name or "")
+    return ""
 
 
 def _calc_v2_notional_usd(
@@ -148,6 +173,7 @@ def run_stage17_tail_cycle(
     limit: int = 20,
     open_new: bool = True,
 ) -> dict[str, Any]:
+    now_utc = datetime.now(UTC)
     if not bool(settings.signal_tail_enabled):
         return {
             "enabled": False,
@@ -175,6 +201,21 @@ def run_stage17_tail_cycle(
             "breaker_blocked": True,
             "breaker_reason": f"{breaker_reason}:{degraded_reason}" if degraded else breaker_reason,
         }
+    budget_pct = max(0.0, float(settings.signal_tail_budget_pct))
+    budget_total = ref_balance * budget_pct
+    category_limits = _category_limit_map(settings)
+    category_used_map: dict[str, float] = {
+        str(cat): float(used or 0.0)
+        for cat, used in db.execute(
+            select(
+                Stage17TailPosition.tail_category,
+                func.coalesce(func.sum(Stage17TailPosition.notional_usd), 0.0),
+            )
+            .where(Stage17TailPosition.status == "OPEN")
+            .group_by(Stage17TailPosition.tail_category)
+        )
+    }
+    open_notional_total = float(sum(float(v or 0.0) for v in category_used_map.values()))
 
     opened = 0
     closed = 0
@@ -211,31 +252,50 @@ def run_stage17_tail_cycle(
         )
     else:
         candidates = []
+    candidate_signal_ids = list({int(s.id) for s in candidates})
+    candidate_market_ids = list({int(s.market_id) for s in candidates if s.market_id is not None})
+    candidate_markets: dict[int, Market] = {}
+    if candidate_market_ids:
+        candidate_markets = {
+            int(m.id): m
+            for m in db.scalars(select(Market).where(Market.id.in_(candidate_market_ids)))
+        }
+    existing_signal_ids: set[int] = set()
+    if candidate_signal_ids:
+        existing_signal_ids = set(
+            int(x)
+            for x in db.scalars(
+                select(Stage17TailPosition.signal_id).where(
+                    Stage17TailPosition.signal_id.in_(candidate_signal_ids),
+                )
+            )
+            if x is not None
+        )
+    open_market_ids: set[int] = set()
+    if candidate_market_ids:
+        open_market_ids = set(
+            int(x)
+            for x in db.scalars(
+                select(Stage17TailPosition.market_id)
+                .where(Stage17TailPosition.status == "OPEN")
+                .where(Stage17TailPosition.market_id.in_(candidate_market_ids))
+            )
+            if x is not None
+        )
     for signal in candidates:
         if opened >= max(1, int(limit)):
             break
         if (open_positions_count + opened) >= int(settings.signal_tail_max_positions_open):
             break
         # Skip if signal already has ANY position (open or closed) — prevents cyclic reopen.
-        existing = db.scalar(
-            select(Stage17TailPosition)
-            .where(Stage17TailPosition.signal_id == signal.id)
-            .limit(1)
-        )
-        if existing is not None:
+        if int(signal.id) in existing_signal_ids:
             skipped += 1
             continue
-        existing_market = db.scalar(
-            select(Stage17TailPosition)
-            .where(Stage17TailPosition.market_id == signal.market_id)
-            .where(Stage17TailPosition.status == "OPEN")
-            .limit(1)
-        )
-        if existing_market is not None:
+        if int(signal.market_id or 0) in open_market_ids:
             skipped += 1
             continue
-        market = db.get(Market, signal.market_id)
-        if market is None or _is_market_resolved(market):
+        market = candidate_markets.get(int(signal.market_id or 0))
+        if market is None or _is_market_resolved(market, now=now_utc):
             skipped += 1
             continue
         metadata = signal.metadata_json if isinstance(signal.metadata_json, dict) else {}
@@ -267,16 +327,6 @@ def run_stage17_tail_cycle(
             llm_reasons = llm.get("reason_codes")
             if isinstance(llm_reasons, list) and llm_reasons:
                 reason_codes = [str(x) for x in llm_reasons if str(x).strip()]
-        breaker_blocked, _loop_reason = check_tail_circuit_breaker(
-            db,
-            settings=settings,
-            balance_usd=ref_balance,
-            api_status={"degraded": degraded},
-            lock_open_rows=False,
-        )
-        if breaker_blocked:
-            skipped += 1
-            continue
         market_prob = float(metadata.get("tail_market_prob") or market.probability_yes or 0.5)
         our_prob = float(metadata.get("tail_our_prob") or market_prob)
         koef = 1.0 / max(1e-6, market_prob)
@@ -286,15 +336,12 @@ def run_stage17_tail_cycle(
             confidence_score=signal.confidence_score,
             market_prob=market_prob,
         )
-        allowed, _cat_reason = can_open_tail_by_category(
-            db,
-            settings=settings,
-            category=tail_category,
-            notional_usd=notional_usd,
-            balance_usd=ref_balance,
-            lock_open_rows=False,
-        )
-        if not allowed:
+        if (open_notional_total + float(notional_usd)) > budget_total:
+            skipped += 1
+            continue
+        cap_pct = float(category_limits.get(str(tail_category), 0.01))
+        used_cat = float(category_used_map.get(str(tail_category), 0.0))
+        if ((used_cat + float(notional_usd)) / max(1e-9, ref_balance)) > cap_pct:
             skipped += 1
             continue
         entry_price = _side_price(market, direction)
@@ -302,7 +349,7 @@ def run_stage17_tail_cycle(
         if resolution_deadline is not None:
             ref_deadline = resolution_deadline if resolution_deadline.tzinfo else resolution_deadline.replace(tzinfo=UTC)
             max_days = max(1, int(settings.signal_tail_max_days_to_resolution))
-            if (ref_deadline - datetime.now(UTC)).total_seconds() / 86400.0 > max_days:
+            if (ref_deadline - now_utc).total_seconds() / 86400.0 > max_days:
                 skipped += 1
                 continue
         row = Stage17TailPosition(
@@ -347,13 +394,20 @@ def run_stage17_tail_cycle(
                 "market_id": int(market.id),
                 "title": str(market.title or signal.title or ""),
                 "tail_category": tail_category,
-                "koef": round(float(koef), 4),
+                "koef": round(float(koef), 2),
                 "market_prob": round(float(market_prob), 6),
                 "our_prob": round(float(our_prob), 6),
-                "notional_usd": round(float(notional_usd), 4),
+                "notional_usd": round(float(notional_usd), 2),
+                "days_to_resolution": int(round(float(metadata.get("tail_days_to_resolution") or 0.0))),
+                "platform": _market_platform_label(market),
                 "direction": direction,
             }
         )
+        existing_signal_ids.add(int(signal.id))
+        if signal.market_id is not None:
+            open_market_ids.add(int(signal.market_id))
+        open_notional_total += float(notional_usd)
+        category_used_map[str(tail_category)] = used_cat + float(notional_usd)
         opened += 1
 
     open_positions = list(
@@ -363,19 +417,22 @@ def run_stage17_tail_cycle(
             .order_by(Stage17TailPosition.opened_at.asc())
         )
     )
+    open_position_market_ids = list({int(r.market_id) for r in open_positions if r.market_id is not None})
+    open_markets: dict[int, Market] = {}
+    if open_position_market_ids:
+        open_markets = {
+            int(m.id): m
+            for m in db.scalars(select(Market).where(Market.id.in_(open_position_market_ids)))
+        }
     for row in open_positions:
-        market = db.get(Market, row.market_id)
+        market = open_markets.get(int(row.market_id or 0))
         if market is None:
             continue
         direction = str(row.direction or "NO").upper()
         mark = _side_price(market, direction)
         # Stage17 v2 supports only YES tail positions. Retire legacy NO rows.
         if direction == "NO":
-            if row.entry_price and row.entry_price > 0 and row.notional_usd and row.notional_usd > 0:
-                shares = float(row.notional_usd) / float(row.entry_price)
-                pnl = (shares * float(mark)) - float(row.notional_usd)
-            else:
-                pnl = 0.0
+            pnl = _position_pnl_from_mark(row, float(mark))
             _close_position(
                 db,
                 row=row,
@@ -392,16 +449,13 @@ def run_stage17_tail_cycle(
             peak = float(row.peak_mark_price or row.entry_price)
             row.peak_mark_price = max(peak, float(mark))
         if row.entry_price and row.entry_price > 0:
-            shares = float(row.notional_usd) / float(row.entry_price)
-            mark_value = shares * mark
-            row.unrealized_pnl_usd = mark_value - float(row.notional_usd)
+            row.unrealized_pnl_usd = _position_pnl_from_mark(row, float(mark))
         # v2 exits for YES-tail strategy.
         if direction == "YES" and row.entry_price and row.entry_price > 0:
             take_profit_mark = float(row.entry_price) * (1.0 + float(settings.signal_tail_take_profit_ratio))
             stop_loss_floor_mark = float(row.entry_price) * float(settings.signal_tail_stop_loss_floor_mult)
             if float(mark) >= take_profit_mark:
-                shares = float(row.notional_usd) / float(row.entry_price)
-                pnl = (shares * float(mark)) - float(row.notional_usd)
+                pnl = _position_pnl_from_mark(row, float(mark))
                 _close_position(
                     db,
                     row=row,
@@ -412,8 +466,7 @@ def run_stage17_tail_cycle(
                 closed += 1
                 continue
             if float(mark) <= stop_loss_floor_mark:
-                shares = float(row.notional_usd) / float(row.entry_price)
-                pnl = (shares * float(mark)) - float(row.notional_usd)
+                pnl = _position_pnl_from_mark(row, float(mark))
                 _close_position(
                     db,
                     row=row,
@@ -425,12 +478,11 @@ def run_stage17_tail_cycle(
                 continue
             if row.resolution_deadline is not None:
                 dl = row.resolution_deadline if row.resolution_deadline.tzinfo else row.resolution_deadline.replace(tzinfo=UTC)
-                days_left = (dl - datetime.now(UTC)).total_seconds() / 86400.0
+                days_left = (dl - now_utc).total_seconds() / 86400.0
                 if days_left <= float(settings.signal_tail_days_before_resolution_exit):
                     min_mark = float(row.entry_price) * float(settings.signal_tail_min_mark_to_hold_mult)
                     if float(mark) < min_mark:
-                        shares = float(row.notional_usd) / float(row.entry_price)
-                        pnl = (shares * float(mark)) - float(row.notional_usd)
+                        pnl = _position_pnl_from_mark(row, float(mark))
                         _close_position(
                             db,
                             row=row,
@@ -440,7 +492,7 @@ def run_stage17_tail_cycle(
                         )
                         closed += 1
                         continue
-        if not _is_market_resolved(market):
+        if not _is_market_resolved(market, now=now_utc):
             continue
         outcome_yes = _resolved_yes(market)
         if outcome_yes is None:

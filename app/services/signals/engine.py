@@ -1404,7 +1404,7 @@ class SignalEngine:
         max_candidates = max(1, int(self.settings.signal_tail_max_candidates))
         min_mispricing = max(0.0, float(self.settings.signal_tail_min_mispricing_ratio))
         min_our_prob = max(0.0, float(self.settings.signal_tail_min_our_prob))
-        max_market_prob = min(1.0, max(0.0, float(self.settings.signal_tail_max_market_prob_for_entry)))
+        max_market_prob = min(1.0, max(0.0, float(self.settings.signal_tail_max_prob)))
         min_koef = max(1.0, float(self.settings.signal_tail_min_koef))
         max_koef = max(min_koef, float(self.settings.signal_tail_max_koef))
         max_days = max(1, int(self.settings.signal_tail_max_days_to_resolution))
@@ -1495,9 +1495,11 @@ class SignalEngine:
                 "crypto_level",
                 "price_target",
                 "geopolitical_event",
+                "election",
                 "sports_match",
                 "earnings_surprise",
                 "regulatory",
+                "company_valuation",
             }:
                 unknown_category_skipped += 1
                 continue

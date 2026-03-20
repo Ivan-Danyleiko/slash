@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -70,29 +71,69 @@ def label_signal_history_from_snapshots(
     skipped_market_missing = 0
     skipped_snapshot_missing = 0
     skipped_probability_missing = 0
+    market_ids = sorted({int(r.market_id) for r in rows if r.market_id is not None})
+    target_by_row_id: dict[int, datetime] = {}
+    rows_missing_timestamp: set[int] = set()
+    targets: list[datetime] = []
+    for row in rows:
+        signal_ts = _as_utc(row.timestamp)
+        if signal_ts is None:
+            rows_missing_timestamp.add(int(row.id))
+            continue
+        target = signal_ts + timedelta(hours=params.hours)
+        target_by_row_id[int(row.id)] = target
+        targets.append(target)
+
+    snapshots_by_market: dict[int, dict[str, list]] = {}
+    if market_ids and targets:
+        min_target = min(targets)
+        max_target = max(targets) + lag_td
+        snap_rows = list(
+            db.scalars(
+                select(MarketSnapshot)
+                .where(MarketSnapshot.market_id.in_(market_ids))
+                .where(MarketSnapshot.fetched_at >= min_target)
+                .where(MarketSnapshot.fetched_at <= max_target)
+                .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.fetched_at.asc())
+            )
+        )
+        for snap in snap_rows:
+            fetched = _as_utc(snap.fetched_at)
+            if fetched is None:
+                continue
+            mid = int(snap.market_id)
+            buf = snapshots_by_market.setdefault(mid, {"times": [], "snaps": []})
+            buf["times"].append(fetched)
+            buf["snaps"].append(snap)
 
     for row in rows:
         if getattr(row, params.field_name) is not None:
             already_labeled += 1
             continue
+        if row.market_id is None:
+            row.missing_label_reason = "market_missing"
+            skipped_market_missing += 1
+            continue
 
-        signal_ts = _as_utc(row.timestamp)
-        if signal_ts is None:
+        row_id = int(row.id)
+        if row_id in rows_missing_timestamp:
             row.missing_label_reason = "timestamp_missing"
             skipped_snapshot_missing += 1
             continue
 
-        target_ts = signal_ts + timedelta(hours=params.hours)
-        snap = db.scalar(
-            select(MarketSnapshot)
-            .where(
-                MarketSnapshot.market_id == row.market_id,
-                MarketSnapshot.fetched_at >= target_ts,
-                MarketSnapshot.fetched_at <= target_ts + lag_td,
-            )
-            .order_by(MarketSnapshot.fetched_at.asc())
-            .limit(1)
-        )
+        target_ts = target_by_row_id.get(row_id)
+        if target_ts is None:
+            row.missing_label_reason = "timestamp_missing"
+            skipped_snapshot_missing += 1
+            continue
+        snap = None
+        market_snapshots = snapshots_by_market.get(int(row.market_id or 0))
+        if market_snapshots is not None:
+            times: list[datetime] = market_snapshots["times"]
+            snaps: list[MarketSnapshot] = market_snapshots["snaps"]
+            idx = bisect_left(times, target_ts)
+            if idx < len(times) and times[idx] <= (target_ts + lag_td):
+                snap = snaps[idx]
 
         if snap is None:
             row.missing_label_reason = f"snapshot_{params.hours}h_missing"

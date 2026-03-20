@@ -63,6 +63,10 @@ def test_stage17_cycle_opens_and_closes_positions() -> None:
     )
     opened = run_stage17_tail_cycle(db, settings=settings, limit=5)
     assert opened["opened"] >= 1
+    assert isinstance(opened.get("opened_alerts"), list)
+    first_alert = (opened.get("opened_alerts") or [])[0]
+    assert "platform" in first_alert
+    assert "days_to_resolution" in first_alert
 
     row = db.scalar(select(Stage17TailPosition).where(Stage17TailPosition.status == "OPEN").limit(1))
     assert row is not None
