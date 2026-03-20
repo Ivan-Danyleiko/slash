@@ -838,8 +838,13 @@ class SignalEngine:
             max_group_size=self.settings.stage18_structural_arb_max_group_size,
         )
         created = 0
+        skipped_invalid_me = 0
         for group in groups:
             if not group.markets:
+                continue
+            # Skip baskets where titles are too similar (not mutually exclusive outcomes)
+            if not group.mutual_exclusivity_valid:
+                skipped_invalid_me += 1
                 continue
             primary_market = group.markets[0]
             outcome = self._create_signal_if_not_recent(
@@ -866,13 +871,17 @@ class SignalEngine:
                     "platforms": group.platform_names,
                     "legs": group.legs,
                     "basket_fill_feasibility": round(group.min_liquidity, 4),
+                    "mutual_exclusivity_valid": True,
                 },
                 signal_direction=None,
             )
             if outcome in ("created", "updated"):
                 created += 1
         self.db.commit()
-        return {"structural_arb_signals_created": created}
+        return {
+            "structural_arb_signals_created": created,
+            "structural_arb_invalid_me_skipped": skipped_invalid_me,
+        }
 
     def run(self) -> dict[str, int]:
         # detect_duplicates() is O(N²) across all markets — runs via its own
