@@ -108,9 +108,9 @@ celery_app.conf.beat_schedule = {
         "task": "sync_all_platforms",
         "schedule": crontab(minute="*/30"),
     },
-    "analyze-markets-every-15-min": {
+    "analyze-markets-after-sync": {
         "task": "analyze_markets",
-        "schedule": crontab(minute="2-59/15"),  # +2min offset after sync
+        "schedule": crontab(minute="2,32"),  # +2min after each 30-min sync cycle
     },
     "detect-duplicates-every-2h": {
         "task": "detect_duplicates",
