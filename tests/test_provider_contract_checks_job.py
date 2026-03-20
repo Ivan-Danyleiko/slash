@@ -21,6 +21,20 @@ class _Resp:
         return self._payload
 
 
+class _FakeClient:
+    def __init__(self, get_fn, timeout=None):
+        self._get_fn = get_fn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def get(self, url, params=None, headers=None, timeout=None):  # noqa: ANN001
+        return self._get_fn(url, params=params, headers=headers, timeout=timeout)
+
+
 def test_provider_contract_checks_job_all_ok(monkeypatch) -> None:
     db = _session()
 
@@ -29,7 +43,7 @@ def test_provider_contract_checks_job_all_ok(monkeypatch) -> None:
             return _Resp(200, {"results": []})
         return _Resp(200, [])
 
-    monkeypatch.setattr("app.tasks.jobs.httpx.get", _fake_get)
+    monkeypatch.setattr("app.tasks.jobs.httpx.Client", lambda **kw: _FakeClient(_fake_get))
     out = provider_contract_checks_job(db)
     assert out["status"] == "ok"
     result = out["result"]
@@ -45,7 +59,7 @@ def test_provider_contract_checks_job_handles_failures(monkeypatch) -> None:
             return _Resp(500, {"error": "x"})
         return _Resp(200, [])
 
-    monkeypatch.setattr("app.tasks.jobs.httpx.get", _fake_get)
+    monkeypatch.setattr("app.tasks.jobs.httpx.Client", lambda **kw: _FakeClient(_fake_get))
     out = provider_contract_checks_job(db)
     assert out["status"] == "error"
     assert out["result"]["checks_failed"] >= 1

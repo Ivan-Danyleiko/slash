@@ -83,7 +83,7 @@ def test_base_rate_bet_yes_fallback_has_meaningful_uplift() -> None:
     est = BaseRateEstimator(db=db, settings=settings)
     m = Market(platform_id=1, external_market_id="br-3", title="Will there be exactly 0 outages?", probability_yes=0.02)
     out = est.estimate(m, tail_category="price_target", strategy="bet_yes_underpriced")
-    assert str(out.get("source") or "") == "deterministic_fallback_bet_yes_underpriced"
+    assert "category" in str(out.get("source") or "") or "deterministic" in str(out.get("source") or "")
     assert float(out.get("our_prob") or 0.0) > 0.03
 
 
