@@ -465,7 +465,7 @@ def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
         db.commit()
         return {"deleted": deleted}
 
-    return _run_job(db, job_name="cleanup_old_signals", run_fn=_run)
+    return _run_job_with_guard(db, job_name="cleanup_old_signals", stale_minutes=1380, run_fn=_run)
 
 
 def update_watchlists_job(db: Session) -> dict:

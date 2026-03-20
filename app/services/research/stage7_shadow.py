@@ -711,6 +711,10 @@ def build_stage7_shadow_report(
         and walkforward_windows_total >= min_walk_windows
     )
 
+    # Commit all stage7 decisions flushed during this run before _finish_job
+    # calls db.rollback() to clear any dirty session state.
+    db.commit()
+
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "lookback_days": lookback_days,

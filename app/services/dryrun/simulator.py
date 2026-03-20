@@ -917,12 +917,6 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
     portfolio.updated_at = now
     db.flush()
 
-    tail_result = run_stage17_tail_cycle(
-        db,
-        settings=get_settings(),
-        limit=0,
-        open_new=False,
-    )
     return {
         "prices_updated": updated,
         "stop_loss_partial": stop_loss_partial,
@@ -931,7 +925,6 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
         "time_exit_closed": time_exit_closed,
         "expired_closed": expired_closed,
         "total_unrealized_usd": round(total_unrealized, 4),
-        "tail": tail_result,
     }
 
 
@@ -1012,10 +1005,4 @@ def check_resolutions(db: Session) -> dict[str, Any]:
         resolved_count += 1
 
     db.flush()
-    tail_result = run_stage17_tail_cycle(
-        db,
-        settings=get_settings(),
-        limit=0,
-        open_new=False,
-    )
-    return {"resolved_closed": resolved_count, "tail": tail_result}
+    return {"resolved_closed": resolved_count}
