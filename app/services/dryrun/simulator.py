@@ -995,7 +995,7 @@ def check_resolutions(db: Session) -> dict[str, Any]:
             continue
 
         # Determine resolution value from source_payload
-        sp: dict[str, Any] = market.source_payload or {}
+        sp: dict[str, Any] = market.source_payload if isinstance(market.source_payload, dict) else {}
         res_val = sp.get("resolutionValue") or sp.get("resolution_value")
 
         if res_val is not None:

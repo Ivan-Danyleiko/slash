@@ -21,9 +21,18 @@ def _is_market_resolved(market: Market, *, now: datetime | None = None) -> bool:
         if ref <= now_ref:
             return True
     status = str(market.status or "").lower()
+    payload = market.source_payload if isinstance(market.source_payload, dict) else {}
+    # Kalshi: "closed" does not mean settled — wait for settlement_timer_seconds
+    if "closed" in status and "settled" not in status:
+        settlement_timer = payload.get("settlement_timer_seconds")
+        has_outcome = any(
+            payload.get(k) is not None
+            for k in ("resolutionProbability", "resolved_probability", "resolution", "resolvedOutcome")
+        )
+        if settlement_timer is not None and not has_outcome:
+            return False
     if any(k in status for k in ("resolved", "closed", "settled", "final", "ended")):
         return True
-    payload = market.source_payload if isinstance(market.source_payload, dict) else {}
     if bool(payload.get("isResolved")) or bool(payload.get("resolved")):
         return True
     return False

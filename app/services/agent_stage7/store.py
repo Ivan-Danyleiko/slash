@@ -65,5 +65,5 @@ def save_stage7_decision(
         llm_cost_usd=float(llm_cost_usd or 0.0),
     )
     db.add(row)
-    db.commit()
+    db.flush()
     return {**payload, "llm_cost_usd": float(llm_cost_usd or 0.0), "cache_hit": False}

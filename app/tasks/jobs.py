@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.secrets import redact_text
 from app.models.enums import SignalType
 from app.models.models import (
+    DryrunPosition,
     JobRun,
     Market,
     MarketSnapshot,
@@ -18,6 +19,9 @@ from app.models.models import (
     Stage7AgentDecision,
     Stage8Decision,
     Stage8Position,
+    Stage10ReplayRow,
+    Stage11Order,
+    Stage17TailPosition,
     User,
 )
 from app.services.collectors.sync_service import CollectorSyncService
@@ -415,7 +419,7 @@ def signal_push_job(db: Session) -> dict:
         result = {"signals_prepared": prepared, "signals_sent": sent, "skipped_by_reason": skipped_by_reason}
         return result
 
-    return _run_job(db, job_name="signal_push", run_fn=_run)
+    return _run_job_with_guard(db, job_name="signal_push", stale_minutes=25, run_fn=_run)
 
 
 def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
@@ -433,12 +437,28 @@ def cleanup_old_signals_job(db: Session, keep_days: int = 30) -> dict:
         has_signal_history_ref = exists(
             select(SignalHistory.id).where(SignalHistory.signal_id == Signal.id)
         )
+        has_stage10_ref = exists(
+            select(Stage10ReplayRow.id).where(Stage10ReplayRow.signal_id == Signal.id)
+        )
+        has_stage11_ref = exists(
+            select(Stage11Order.id).where(Stage11Order.signal_id == Signal.id)
+        )
+        has_dryrun_ref = exists(
+            select(DryrunPosition.id).where(DryrunPosition.signal_id == Signal.id)
+        )
+        has_stage17_ref = exists(
+            select(Stage17TailPosition.id).where(Stage17TailPosition.signal_id == Signal.id)
+        )
         stmt = delete(Signal).where(
             Signal.created_at < cutoff,
             ~has_stage7_ref,
             ~has_stage8_ref,
             ~has_stage8_position_ref,
             ~has_signal_history_ref,
+            ~has_stage10_ref,
+            ~has_stage11_ref,
+            ~has_dryrun_ref,
+            ~has_stage17_ref,
         )
         deleted = db.execute(stmt).rowcount or 0
         db.commit()
@@ -1434,7 +1454,7 @@ def label_signal_history_resolution_job(
         }
         return result
 
-    return _run_job(db, job_name="label_signal_history_resolution", run_fn=_run)
+    return _run_job_with_guard(db, job_name="label_signal_history_resolution", stale_minutes=50, run_fn=_run)
 
 
 def cleanup_signal_history_job(db: Session) -> dict:
