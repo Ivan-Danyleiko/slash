@@ -265,7 +265,12 @@ def duplicate_shadow(
     db: Session = Depends(get_db),
 ) -> dict:
     settings = get_settings()
-    markets = list(db.scalars(select(Market)))
+    markets = list(db.scalars(
+        select(Market)
+        .where(Market.probability_yes.is_not(None))
+        .order_by(Market.fetched_at.desc())
+        .limit(5000)
+    ))
 
     broad = DuplicateDetector.with_profile(settings=settings, profile="aggressive")
     broad.min_overlap = settings.signal_duplicate_broad_min_overlap
@@ -681,16 +686,30 @@ def signal_history_stats(days: int = 7, db: Session = Depends(get_db)) -> dict:
     total = int(
         db.scalar(select(func.count()).select_from(SignalHistory).where(SignalHistory.timestamp >= cutoff)) or 0
     )
-    recent_rows = list(db.scalars(select(SignalHistory).where(SignalHistory.timestamp >= cutoff)))
-    labeled_15m = sum(
-        1
-        for row in recent_rows
-        if isinstance(row.simulated_trade, dict) and row.simulated_trade.get("probability_after_15m") is not None
+    # Count 15m/30m labels via SQL JSONB containment — avoids loading all rows into memory.
+    from sqlalchemy import cast
+    from sqlalchemy.dialects.postgresql import JSONB
+    labeled_15m = int(
+        db.scalar(
+            select(func.count())
+            .select_from(SignalHistory)
+            .where(
+                SignalHistory.timestamp >= cutoff,
+                SignalHistory.simulated_trade.is_not(None),
+                cast(SignalHistory.simulated_trade, JSONB).has_key("probability_after_15m"),
+            )
+        ) or 0
     )
-    labeled_30m = sum(
-        1
-        for row in recent_rows
-        if isinstance(row.simulated_trade, dict) and row.simulated_trade.get("probability_after_30m") is not None
+    labeled_30m = int(
+        db.scalar(
+            select(func.count())
+            .select_from(SignalHistory)
+            .where(
+                SignalHistory.timestamp >= cutoff,
+                SignalHistory.simulated_trade.is_not(None),
+                cast(SignalHistory.simulated_trade, JSONB).has_key("probability_after_30m"),
+            )
+        ) or 0
     )
     labeled_1h = int(
         db.scalar(

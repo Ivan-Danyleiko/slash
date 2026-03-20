@@ -129,6 +129,24 @@ def build_stage11_execution_report(
     rows = list(
         db.scalars(select(Stage8Decision).where(Stage8Decision.created_at >= cutoff).order_by(Stage8Decision.created_at.desc()).limit(limit))
     )
+    # Batch-preload signals and markets to avoid N+1 queries in the loop below.
+    _signal_ids = list({int(r.signal_id) for r in rows if r.signal_id is not None})
+    _signals_map: dict[int, Signal] = {
+        s.id: s for s in db.scalars(select(Signal).where(Signal.id.in_(_signal_ids)))
+    } if _signal_ids else {}
+    _market_ids = list({int(s.market_id) for s in _signals_map.values() if s.market_id is not None})
+    _markets_map: dict[int, Market] = {
+        m.id: m for m in db.scalars(select(Market).where(Market.id.in_(_market_ids)))
+    } if _market_ids else {}
+    # Preload open exposure per client in a single grouped query.
+    _exposure_rows = db.execute(
+        select(Stage11ClientPosition.client_id,
+               func.coalesce(func.sum(Stage11ClientPosition.notional_usd), 0.0).label("exposure"))
+        .where(Stage11ClientPosition.status == "OPEN")
+        .group_by(Stage11ClientPosition.client_id)
+    ).all()
+    _exposure_map: dict[int, float] = {r.client_id: float(r.exposure) for r in _exposure_rows}
+
     created_orders = 0
     blocked = 0
     shadow_skipped = 0
@@ -147,16 +165,9 @@ def build_stage11_execution_report(
                 shadow_skipped += 1
                 client_shadow_skipped += 1
                 continue
-            signal = db.get(Signal, int(row.signal_id))
-            market = db.get(Market, int(signal.market_id)) if signal else None
-            open_exposure = float(
-                db.scalar(
-                    select(func.coalesce(func.sum(Stage11ClientPosition.notional_usd), 0.0))
-                    .where(Stage11ClientPosition.client_id == client.id)
-                    .where(Stage11ClientPosition.status == "OPEN")
-                )
-                or 0.0
-            )
+            signal = _signals_map.get(int(row.signal_id)) if row.signal_id else None
+            market = _markets_map.get(int(signal.market_id)) if signal and signal.market_id else None
+            open_exposure = _exposure_map.get(client.id, 0.0)
             hard_reasons = _pretrade_hard_block_reasons(
                 data_sufficient_for_acceptance=data_sufficient,
                 market=market,

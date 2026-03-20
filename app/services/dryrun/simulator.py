@@ -810,8 +810,14 @@ def refresh_mark_prices(db: Session) -> dict[str, Any]:
     now_cmp = _as_utc_naive(now) or now.replace(tzinfo=None)
     total_unrealized = 0.0
 
+    # Batch-load all markets for open positions — avoids N+1 db.get() per position.
+    _mids = list({pos.market_id for pos in open_positions if pos.market_id is not None})
+    _mmap: dict[int, Market] = {
+        m.id: m for m in db.scalars(select(Market).where(Market.id.in_(_mids)))
+    } if _mids else {}
+
     for pos in open_positions:
-        market = db.get(Market, pos.market_id)
+        market = _mmap.get(pos.market_id)
         if market is None:
             continue
 
@@ -974,8 +980,14 @@ def check_resolutions(db: Session) -> dict[str, Any]:
     resolved_count = 0
     now = datetime.now(UTC)
 
+    # Batch-load markets — avoids N+1 db.get() per position.
+    _res_mids = list({pos.market_id for pos in open_positions if pos.market_id is not None})
+    _res_mmap: dict[int, Market] = {
+        m.id: m for m in db.scalars(select(Market).where(Market.id.in_(_res_mids)))
+    } if _res_mids else {}
+
     for pos in open_positions:
-        market = db.get(Market, pos.market_id)
+        market = _res_mmap.get(pos.market_id)
         if market is None:
             continue
         status = str(market.status or "").lower()
