@@ -418,6 +418,15 @@ class Settings(BaseSettings):
     pro_plan_daily_signals: int = Field(default=30, alias="PRO_PLAN_DAILY_SIGNALS")
     premium_plan_daily_signals: int = Field(default=200, alias="PREMIUM_PLAN_DAILY_SIGNALS")
 
+    stage18_event_canon_enabled: bool = Field(default=True, alias="STAGE18_EVENT_CANON_ENABLED")
+    stage18_event_group_min_confidence: float = Field(default=0.60, alias="STAGE18_EVENT_GROUP_MIN_CONFIDENCE")
+    stage18_topic_weights_enabled: bool = Field(default=True, alias="STAGE18_TOPIC_WEIGHTS_ENABLED")
+    stage18_topic_weights_min_n: int = Field(default=100, alias="STAGE18_TOPIC_WEIGHTS_MIN_N")
+    stage18_structural_arb_enabled: bool = Field(default=True, alias="STAGE18_STRUCTURAL_ARB_ENABLED")
+    stage18_structural_arb_min_underround: float = Field(default=0.015, alias="STAGE18_STRUCTURAL_ARB_MIN_UNDERROUND")
+    stage18_structural_arb_max_group_size: int = Field(default=8, alias="STAGE18_STRUCTURAL_ARB_MAX_GROUP_SIZE")
+    stage18_require_kalshi: bool = Field(default=False, alias="STAGE18_REQUIRE_KALSHI")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

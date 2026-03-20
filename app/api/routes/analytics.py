@@ -104,6 +104,7 @@ from app.services.research.walkforward import (
 )
 from app.api.routes.analytics_stage11 import register_stage11_routes
 from app.api.routes.analytics_stage17 import register_stage17_routes
+from app.api.routes.analytics_stage18 import register_stage18_routes
 from app.api.routes.analytics_stage10 import register_stage10_routes
 from app.api.routes.analytics_stage9 import register_stage9_routes
 from app.api.routes.analytics_stage8 import register_stage8_routes
@@ -191,6 +192,7 @@ def _signal_diversity(signals_by_type: dict[str, int]) -> float:
     return min(1.0, max(0.0, entropy / max_entropy))
 
 
+register_stage18_routes(router, cached_heavy_get=_cached_heavy_get)
 register_stage17_routes(router, cached_heavy_get=_cached_heavy_get)
 register_stage11_routes(router, cached_heavy_get=_cached_heavy_get)
 register_stage10_routes(router, cached_heavy_get=_cached_heavy_get)

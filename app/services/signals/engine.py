@@ -231,6 +231,16 @@ class SignalEngine:
         flagged_gross = 0
         flagged_net = 0
 
+        # Stage18: load topic weights for weighted divergence
+        topic_weights: dict[tuple[str, str], float] = {}
+        if getattr(self.settings, 'stage18_topic_weights_enabled', False):
+            from app.services.stage18.topic_weights import build_topic_weight_matrix
+            topic_weights = build_topic_weight_matrix(
+                self.db,
+                min_n=self.settings.stage18_topic_weights_min_n,
+            )
+        platform_by_id_cache = {p.id: str(p.name or "").upper() for p in self.db.scalars(select(Platform))}
+
         # Batch-load all needed markets in one query instead of N+1 db.get() calls.
         if pairs:
             pair_market_ids = set()
@@ -252,6 +262,15 @@ class SignalEngine:
             exec_res = divergence_detector.compute_executable_divergence(market_a, market_b)
             if gross is not None and gross >= self.settings.signal_divergence_threshold:
                 flagged_gross += 1
+
+            # Stage18: compute weighted divergence and store in pair metadata
+            if topic_weights and gross is not None:
+                from app.services.stage18.topic_weights import get_platform_weight
+                plat_a = platform_by_id_cache.get(market_a.platform_id, "UNKNOWN")
+                plat_b = platform_by_id_cache.get(market_b.platform_id, "UNKNOWN")
+                w_a = get_platform_weight(topic_weights, plat_a, market_a.category)
+                w_b = get_platform_weight(topic_weights, plat_b, market_b.category)
+                divergence_detector.weighted_divergence_score(market_a, market_b, w_a, w_b)
 
             if self.settings.signal_divergence_use_executable:
                 threshold_value = exec_res.net_edge_after_costs if exec_res is not None else None
@@ -294,6 +313,7 @@ class SignalEngine:
                         SignalType.DUPLICATE_MARKET,
                         SignalType.DIVERGENCE,
                         SignalType.ARBITRAGE_CANDIDATE,
+                        SignalType.STRUCTURAL_ARB_CANDIDATE,
                     ]
                 ),
                 ~has_stage7_ref,
@@ -807,6 +827,53 @@ class SignalEngine:
             },
         }
 
+    def generate_structural_arb_signals(self) -> dict[str, int]:
+        """Stage18 Workstream C: generate STRUCTURAL_ARB_CANDIDATE signals."""
+        if not getattr(self.settings, 'stage18_structural_arb_enabled', False):
+            return {"structural_arb_signals_created": 0}
+        from app.services.stage18.structural_arb import detect_structural_arb
+        groups = detect_structural_arb(
+            self.db,
+            min_underround=self.settings.stage18_structural_arb_min_underround,
+            max_group_size=self.settings.stage18_structural_arb_max_group_size,
+        )
+        created = 0
+        for group in groups:
+            if not group.markets:
+                continue
+            primary_market = group.markets[0]
+            outcome = self._create_signal_if_not_recent(
+                signal_type=SignalType.STRUCTURAL_ARB_CANDIDATE,
+                market_id=primary_market.id,
+                related_market_id=None,
+                title=f"Structural arb: {group.event_group_id} ({len(group.markets)} legs)",
+                summary=(
+                    f"underround={group.underround:.3f}; "
+                    f"sum_prob={group.sum_prob:.3f}; "
+                    f"legs={len(group.markets)}; "
+                    f"neg_risk={group.is_neg_risk}"
+                ),
+                confidence_score=min(1.0, group.underround * 10),
+                liquidity_score=group.min_liquidity,
+                divergence_score=group.underround,
+                metadata_json={
+                    "event_group_id": group.event_group_id,
+                    "underround": group.underround,
+                    "overround": group.overround,
+                    "sum_prob": group.sum_prob,
+                    "is_neg_risk": group.is_neg_risk,
+                    "category": group.category,
+                    "platforms": group.platform_names,
+                    "legs": group.legs,
+                    "basket_fill_feasibility": round(group.min_liquidity, 4),
+                },
+                signal_direction=None,
+            )
+            if outcome in ("created", "updated"):
+                created += 1
+        self.db.commit()
+        return {"structural_arb_signals_created": created}
+
     def run(self) -> dict[str, int]:
         # detect_duplicates() is O(N²) across all markets — runs via its own
         # scheduled task every 2 hours. run() reads the pre-computed pairs from DB.
@@ -815,6 +882,7 @@ class SignalEngine:
         result.update(self.detect_divergence())
         result.update(self.capture_divergence_research_samples())
         result.update(self.generate_signals())
+        result.update(self.generate_structural_arb_signals())
         return result
 
     def capture_divergence_research_samples(self) -> dict[str, int]:

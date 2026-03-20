@@ -33,12 +33,18 @@ class CollectorSyncService:
             logger.info("collector_fetch_started", platform=collector.platform_name)
             markets = collector.fetch_markets()
             summary["fetched"] = len(markets)
+            settings = get_settings()
+            canon_enabled = settings.stage18_event_canon_enabled
+            if canon_enabled:
+                from app.services.stage18.canonicalizer import apply_canonical_key
             for market in markets:
-                _, is_inserted = self.repo.upsert_market(market)
+                market_obj, is_inserted = self.repo.upsert_market(market)
                 if is_inserted:
                     summary["inserted"] += 1
                 else:
                     summary["updated"] += 1
+                if canon_enabled:
+                    apply_canonical_key(market_obj)
             self.db.commit()
             logger.info("collector_fetch_finished", platform=collector.platform_name, summary=summary)
             return summary

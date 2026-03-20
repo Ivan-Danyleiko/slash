@@ -20,6 +20,8 @@ from app.tasks.jobs import (
     stage17_batch_job,
     stage17_cycle_job,
     stage17_track_job,
+    stage18_canonicalize_job,
+    stage18_track_job,
     stage7_evaluate_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
@@ -92,6 +94,8 @@ _TASK_JOB_MAP = {
     "stage17_track": stage17_track_job,
     "stage17_cycle": stage17_cycle_job,
     "stage17_batch": stage17_batch_job,
+    "stage18_canonicalize": stage18_canonicalize_job,
+    "stage18_track": stage18_track_job,
 }
 
 for _task_name, _job_fn in _TASK_JOB_MAP.items():
@@ -202,5 +206,13 @@ celery_app.conf.beat_schedule = {
     "stage17-cycle-every-15-min": {
         "task": "stage17_cycle",
         "schedule": crontab(minute="*/15"),
+    },
+    "stage18-canonicalize-every-30-min": {
+        "task": "stage18_canonicalize",
+        "schedule": crontab(minute="*/30"),
+    },
+    "stage18-track-daily": {
+        "task": "stage18_track",
+        "schedule": crontab(hour=3, minute=50),
     },
 }

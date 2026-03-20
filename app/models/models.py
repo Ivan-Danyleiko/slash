@@ -63,6 +63,9 @@ class Market(Base):
     open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
     notional_value_dollars: Mapped[float | None] = mapped_column(Float, nullable=True)
     previous_yes_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    event_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    event_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
+    event_key_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     platform: Mapped[Platform] = relationship()
 

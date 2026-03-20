@@ -942,6 +942,23 @@ def stage17_batch_job(
     )
 
 
+def stage18_canonicalize_job(db: Session) -> dict:
+    """Backfill event_group_id for all markets missing canonicalization."""
+    def _run() -> dict:
+        from app.services.stage18.canonicalizer import backfill_canonical_keys
+        return backfill_canonical_keys(db)
+    return _run_job_with_guard(db, job_name="stage18_canonicalize", stale_minutes=60, run_fn=_run)
+
+
+def stage18_track_job(db: Session) -> dict:
+    """Run all Stage18 research reports and persist artifacts."""
+    def _run() -> dict:
+        from app.services.research.stage18_report import build_stage18_final_report
+        settings = get_settings()
+        return build_stage18_final_report(db, settings=settings)
+    return _run_job(db, job_name="stage18_track", run_fn=_run)
+
+
 def quality_snapshot_job(db: Session) -> dict:
     def _run() -> dict:
         settings = get_settings()

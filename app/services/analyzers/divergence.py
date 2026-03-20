@@ -94,3 +94,20 @@ class DivergenceDetector:
             ask_b=float(ask_b),
             bid_b=float(bid_b),
         )
+
+    def weighted_divergence_score(
+        self,
+        market_a: Market,
+        market_b: Market,
+        weight_a: float = 1.0,
+        weight_b: float = 1.0,
+    ) -> float | None:
+        """Divergence scaled by platform reliability harmonic mean."""
+        gross = self.divergence(market_a, market_b)
+        if gross is None:
+            return None
+        denom = weight_a + weight_b
+        if denom < 1e-9:
+            return gross
+        hmean = 2.0 * weight_a * weight_b / denom
+        return gross * hmean
