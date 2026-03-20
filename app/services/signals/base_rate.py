@@ -142,10 +142,23 @@ class BaseRateEstimator:
         if direction is None:
             return None
 
-        m = re.search(r"\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)", text)
-        if not m:
-            return None
-        target = float(m.group(1).replace(",", ""))
+        m_suffix = re.search(r"[0-9][0-9,]*(?:[.][0-9]+)?\s*([kmb])\b", text)
+        if m_suffix:
+            raw = m_suffix.group(0)
+            suffix = m_suffix.group(1).lower()
+            num_str = raw[: raw.lower().index(suffix)].strip()
+            target = float(num_str.replace(",", ""))
+            if suffix == "k":
+                target *= 1_000
+            elif suffix == "m":
+                target *= 1_000_000
+            elif suffix == "b":
+                target *= 1_000_000_000
+        else:
+            m = re.search(r"\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)", text)
+            if not m:
+                return None
+            target = float(m.group(1).replace(",", ""))
         if target <= 0:
             return None
         return symbol, direction, target
