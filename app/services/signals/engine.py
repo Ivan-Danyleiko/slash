@@ -3,7 +3,7 @@ import re
 
 from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.core.config import get_settings
 from app.models.enums import SignalType
@@ -73,6 +73,15 @@ class SignalEngine:
         markets = list(
             self.db.scalars(
                 select(Market)
+                .options(
+                    load_only(
+                        Market.id,
+                        Market.title,
+                        Market.platform_id,
+                        Market.resolution_time,
+                        Market.fetched_at,
+                    )
+                )
                 .order_by(Market.fetched_at.desc(), Market.id.desc())
                 .limit(max_candidate_markets)
             )
@@ -548,21 +557,43 @@ class SignalEngine:
             else:
                 rules_cooldown_blocked += 1
 
-        # Only load recent snapshots — older ones can't produce a "recent move" signal.
-        snap_cutoff = datetime.now(UTC) - timedelta(days=7)
+        # Load top-2 snapshots per market via window function.
+        # Use 48h cutoff (not 7d) — only recent moves matter for signals.
+        snap_cutoff = datetime.now(UTC) - timedelta(hours=48)
+        _rn = func.row_number().over(
+            partition_by=MarketSnapshot.market_id,
+            order_by=MarketSnapshot.fetched_at.desc(),
+        ).label("rn")
+        _subq = (
+            select(MarketSnapshot.id, _rn)
+            .where(MarketSnapshot.fetched_at >= snap_cutoff)
+            .subquery()
+        )
+        _top_ids = list(self.db.scalars(
+            select(_subq.c.id).where(_subq.c.rn <= 2)
+        ))
         snapshots = list(self.db.scalars(
             select(MarketSnapshot)
-            .where(MarketSnapshot.fetched_at >= snap_cutoff)
-            .order_by(MarketSnapshot.market_id, MarketSnapshot.fetched_at.desc())
-        ))
+            .where(MarketSnapshot.id.in_(_top_ids))
+        )) if _top_ids else []
         last_two: dict[int, list[MarketSnapshot]] = {}
         for snap in snapshots:
-            bucket = last_two.setdefault(snap.market_id, [])
-            if len(bucket) < 2:
-                bucket.append(snap)
+            last_two.setdefault(snap.market_id, []).append(snap)
 
+        # Incremental: only markets updated in the last 48h — avoids full 31k scan.
+        _arb_cutoff = datetime.now(UTC) - timedelta(hours=48)
         arbitrage_candidates: list[tuple[Market, float, float, float, str, float, float, str]] = []
-        for market in self.db.scalars(select(Market).where(Market.probability_yes.is_not(None))):
+        for market in self.db.scalars(
+            select(Market)
+            .where(Market.probability_yes.is_not(None))
+            .where(Market.fetched_at >= _arb_cutoff)
+            .options(load_only(
+                Market.id, Market.title, Market.platform_id,
+                Market.probability_yes, Market.volume_24h,
+                Market.resolution_time, Market.source_payload,
+                Market.fetched_at,
+            ))
+        ):
             arbitrage_attempted += 1
             title_l = (market.title or "").lower()
             if any(token in title_l for token in excluded_tokens):
@@ -1059,7 +1090,18 @@ class SignalEngine:
                 "skipped_too_large_diff": 0,
             }
 
-        markets = list(self.db.scalars(select(Market).where(Market.probability_yes.is_not(None))))
+        # Limit to recently updated markets + load only needed fields.
+        _div_cutoff = datetime.now(UTC) - timedelta(hours=48)
+        _div_limit = max(500, int(getattr(self.settings, "signal_divergence_research_max_markets", 5000)))
+        markets = list(self.db.scalars(
+            select(Market)
+            .where(Market.probability_yes.is_not(None))
+            .where(Market.fetched_at >= _div_cutoff)
+            .options(load_only(Market.id, Market.title, Market.platform_id, Market.probability_yes,
+                               Market.volume_24h, Market.fetched_at))
+            .order_by(Market.fetched_at.desc())
+            .limit(_div_limit)
+        ))
         stopwords = {
             "will", "what", "when", "where", "which", "about", "with", "from", "that", "this", "have", "been",
             "into", "over", "under", "after", "before", "more", "than", "into", "year", "market",

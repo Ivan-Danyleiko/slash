@@ -104,9 +104,9 @@ for _task_name, _job_fn in _TASK_JOB_MAP.items():
 
 celery_app.conf.beat_schedule = {
     # Core data pipeline — staggered to avoid DB contention
-    "sync-platforms-every-15-min": {
+    "sync-platforms-every-30-min": {
         "task": "sync_all_platforms",
-        "schedule": crontab(minute="*/15"),
+        "schedule": crontab(minute="*/30"),
     },
     "analyze-markets-every-15-min": {
         "task": "analyze_markets",
@@ -116,18 +116,9 @@ celery_app.conf.beat_schedule = {
         "task": "detect_duplicates",
         "schedule": crontab(minute=5, hour="*/2"),
     },
-    "analyze-rules-every-20-min": {
-        "task": "analyze_rules",
-        "schedule": crontab(minute="4-59/20"),  # +4min offset after sync
-    },
-    "detect-divergence-every-20-min": {
-        "task": "detect_divergence",
-        "schedule": crontab(minute="6-59/20"),  # +6min offset
-    },
-    "generate-signals-every-20-min": {
-        "task": "generate_signals",
-        "schedule": crontab(minute="8-59/20"),  # +8min offset, after divergence
-    },
+    # NOTE: analyze_rules, detect_divergence, generate_signals are already called
+    # inside analyze_markets_job (SignalEngine.run()). Running them separately
+    # doubled the work every cycle. Removed from beat — available as on-demand tasks.
     # User-facing
     "update-watchlists-hourly": {
         "task": "update_watchlists",
