@@ -20,6 +20,7 @@ from app.services.agent_stage8 import (
     save_stage8_decision,
 )
 from app.services.agent_stage8.store import load_stage8_today_map
+from app.services.research.shared import resolved_success_map as _resolved_success_map
 from app.services.research.walkforward import build_walkforward_report
 
 _DATA_SUFFICIENCY_CACHE_TTL_SECONDS = 300
@@ -43,24 +44,6 @@ def _latest_stage7_decision_map(db: Session, signal_ids: list[int]) -> dict[int,
     )
     return {int(r.signal_id): r for r in rows}
 
-
-def _resolved_success_map(db: Session, signal_ids: list[int]) -> dict[int, bool]:
-    if not signal_ids:
-        return {}
-    rows = list(
-        db.execute(
-            select(SignalHistory.signal_id, SignalHistory.resolved_success)
-            .where(SignalHistory.signal_id.in_(signal_ids))
-            .where(SignalHistory.resolved_success.is_not(None))
-            .order_by(SignalHistory.timestamp.desc())
-        )
-    )
-    out: dict[int, bool] = {}
-    for sid, success in rows:
-        signal_id = int(sid or 0)
-        if signal_id and signal_id not in out:
-            out[signal_id] = bool(success)
-    return out
 
 
 def _data_sufficiency_snapshot(db: Session) -> dict[str, Any]:

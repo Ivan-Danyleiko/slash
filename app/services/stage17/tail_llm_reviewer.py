@@ -9,6 +9,7 @@ import hashlib
 
 from app.core.config import Settings
 from app.models.models import Market, Signal
+from app.utils.llm_providers import build_provider_chain as _build_provider_chain
 
 _CACHE_TTL_SECONDS = 3600
 _TAIL_LLM_CACHE: dict[str, tuple[datetime, dict[str, Any]]] = {}
@@ -35,52 +36,6 @@ def _input_hash(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-
-def _build_provider_chain(settings: Settings) -> list[dict[str, Any]]:
-    timeout = max(1.0, float(settings.stage7_openai_timeout_seconds))
-    chain: list[dict[str, Any]] = []
-    groq = str(settings.groq_api_key or "").strip()
-    if groq:
-        chain.append(
-            {
-                "provider": "groq",
-                "base_url": "https://api.groq.com/openai/v1",
-                "api_key": groq,
-                "model": str(settings.stage7_groq_model or "llama-3.3-70b-versatile"),
-                "headers": {},
-                "timeout": timeout,
-            }
-        )
-    gemini = str(settings.gemini_api_key or "").strip()
-    if gemini:
-        chain.append(
-            {
-                "provider": "gemini",
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-                "api_key": gemini,
-                "model": str(settings.stage7_gemini_model or "gemini-2.5-flash"),
-                "headers": {},
-                "timeout": timeout,
-            }
-        )
-    openrouter = str(settings.openrouter_api_key or "").strip()
-    if openrouter:
-        headers: dict[str, str] = {}
-        if str(settings.stage7_openrouter_http_referer or "").strip():
-            headers["HTTP-Referer"] = str(settings.stage7_openrouter_http_referer).strip()
-        if str(settings.stage7_openrouter_x_title or "").strip():
-            headers["X-Title"] = str(settings.stage7_openrouter_x_title).strip()
-        chain.append(
-            {
-                "provider": "openrouter",
-                "base_url": "https://openrouter.ai/api/v1",
-                "api_key": openrouter,
-                "model": str(settings.stage7_openrouter_model or "google/gemini-2.5-flash-preview"),
-                "headers": headers,
-                "timeout": timeout,
-            }
-        )
-    return chain
 
 
 def _request_json(*, base_url: str, api_key: str, headers_extra: dict[str, str], body: dict[str, Any], timeout: float) -> dict[str, Any]:

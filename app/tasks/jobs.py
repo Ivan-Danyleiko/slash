@@ -50,6 +50,7 @@ from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.telegram_product import TelegramProductService
+from app.utils.market_resolve import is_market_resolved as _market_is_resolved
 
 _STAGE17_CATEGORY_EMOJI = {
     "price_target": "💰",
@@ -1069,30 +1070,6 @@ def _as_utc(ts: datetime | None) -> datetime | None:
         return ts.replace(tzinfo=UTC)
     return ts.astimezone(UTC)
 
-
-def _market_is_resolved(market: Market, *, now: datetime) -> bool:
-    payload = _as_obj_dict(market.source_payload)
-    status = (market.status or "").strip().lower()
-    # Some providers (notably Kalshi) can be CLOSED before final settlement outcome is available.
-    if "closed" in status:
-        settlement_timer = payload.get("settlement_timer_seconds")
-        has_outcome = any(
-            payload.get(k) is not None for k in ("resolution", "resolvedOutcome", "outcome", "result", "resolutionProbability")
-        )
-        if settlement_timer is not None and not has_outcome:
-            return False
-    resolution_time_utc = _as_utc(market.resolution_time)
-    if resolution_time_utc and resolution_time_utc <= now:
-        return True
-    if any(token in status for token in ("resolved", "settled", "final", "ended")):
-        return True
-    if "closed" in status:
-        return True
-    if isinstance(payload.get("isResolved"), bool) and payload.get("isResolved"):
-        return True
-    if isinstance(payload.get("resolved"), bool) and payload.get("resolved"):
-        return True
-    return False
 
 
 def _extract_resolved_probability(market: Market) -> float | None:

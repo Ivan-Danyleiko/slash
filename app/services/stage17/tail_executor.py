@@ -11,31 +11,7 @@ from app.models.enums import SignalType
 from app.models.models import JobRun, Market, Signal, Stage17TailFill, Stage17TailPosition
 from app.services.agent_stage7.tail_stage7 import evaluate_tail_stage7
 from app.services.signals.tail_circuit_breaker import _category_limit_map, check_tail_circuit_breaker
-
-
-def _is_market_resolved(market: Market, *, now: datetime | None = None) -> bool:
-    now_ref = now or datetime.now(UTC)
-    rt = market.resolution_time
-    if rt is not None:
-        ref = rt.astimezone(UTC) if rt.tzinfo else rt.replace(tzinfo=UTC)
-        if ref <= now_ref:
-            return True
-    status = str(market.status or "").lower()
-    payload = market.source_payload if isinstance(market.source_payload, dict) else {}
-    # Kalshi: "closed" does not mean settled — wait for settlement_timer_seconds
-    if "closed" in status and "settled" not in status:
-        settlement_timer = payload.get("settlement_timer_seconds")
-        has_outcome = any(
-            payload.get(k) is not None
-            for k in ("resolutionProbability", "resolved_probability", "resolution", "resolvedOutcome")
-        )
-        if settlement_timer is not None and not has_outcome:
-            return False
-    if any(k in status for k in ("resolved", "closed", "settled", "final", "ended")):
-        return True
-    if bool(payload.get("isResolved")) or bool(payload.get("resolved")):
-        return True
-    return False
+from app.utils.market_resolve import is_market_resolved as _is_market_resolved
 
 
 def _resolved_yes(market: Market) -> bool | None:

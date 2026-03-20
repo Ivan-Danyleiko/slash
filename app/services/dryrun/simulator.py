@@ -32,6 +32,8 @@ from app.services.dryrun.scorer import composite_score
 from app.services.dryrun.cross_platform import build_cross_platform_prob_map, get_cross_platform_prob
 from app.services.stage17.tail_executor import run_stage17_tail_cycle
 from app.utils.http import retry_request
+from app.utils.llm_providers import build_provider_chain
+from app.utils.market_resolve import is_market_resolved
 
 logger = logging.getLogger(__name__)
 
@@ -88,38 +90,7 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
         return set()
 
     settings = get_settings()
-
-    # Pick first available LLM provider
-    providers: list[tuple[str, str, str, dict[str, str]]] = []
-    if settings.groq_api_key:
-        providers.append(
-            ("https://api.groq.com/openai/v1", settings.groq_api_key, settings.stage7_groq_model, {})
-        )
-    if settings.gemini_api_key:
-        providers.append((
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            settings.gemini_api_key,
-            settings.stage7_gemini_model,
-            {},
-        ))
-    if settings.openrouter_api_key:
-        extra_headers: dict[str, str] = {}
-        if str(settings.stage7_openrouter_http_referer or "").strip():
-            extra_headers["HTTP-Referer"] = str(settings.stage7_openrouter_http_referer).strip()
-        if str(settings.stage7_openrouter_x_title or "").strip():
-            extra_headers["X-Title"] = str(settings.stage7_openrouter_x_title).strip()
-        providers.append(
-            (
-                "https://openrouter.ai/api/v1",
-                settings.openrouter_api_key,
-                settings.stage7_openrouter_model,
-                extra_headers,
-            )
-        )
-    if settings.stage7_openai_api_key:
-        providers.append(
-            (settings.stage7_openai_api_base_url, settings.stage7_openai_api_key, settings.stage7_openai_model, {})
-        )
+    providers = build_provider_chain(settings)
     if not providers:
         return set()
 
@@ -137,7 +108,11 @@ def _llm_review_borderline(candidates: list[dict[str, Any]]) -> set[int]:
         for c in candidates
     ]
 
-    for api_base, api_key, model, extra_headers in providers:
+    for p in providers:
+        api_base = p["base_url"]
+        api_key = p["api_key"]
+        model = p["model"]
+        extra_headers = p["headers"]
         try:
             body = json.dumps({
                 "model": model,
@@ -990,8 +965,7 @@ def check_resolutions(db: Session) -> dict[str, Any]:
         market = _res_mmap.get(pos.market_id)
         if market is None:
             continue
-        status = str(market.status or "").lower()
-        if status not in ("resolved", "closed", "cancelled"):
+        if not is_market_resolved(market):
             continue
 
         # Determine resolution value from source_payload

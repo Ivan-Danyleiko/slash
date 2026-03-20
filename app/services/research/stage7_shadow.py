@@ -21,6 +21,7 @@ from app.services.agent_stage7.external_verifier import build_external_verificat
 from app.services.agent_stage7.internal_gate import evaluate_internal_gate
 from app.services.agent_stage7.store import get_cached_stage7_decision, save_stage7_decision
 from app.services.agent_stage7.stack_adapters import get_stage7_adapter
+from app.services.research.shared import resolved_success_map as _resolved_success_map
 from app.services.agent_stage7.stack_adapters.base import Stage7AdapterInput
 from app.services.agent_stage7.historical_rag import get_historical_rag_context
 from app.services.dryrun.reporter import get_portfolio_snapshot
@@ -46,24 +47,6 @@ def _decision_counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
         counts[d] += 1
     return counts
 
-
-def _resolved_success_map(db: Session, signal_ids: list[int]) -> dict[int, bool | None]:
-    if not signal_ids:
-        return {}
-    rows = list(
-        db.execute(
-            select(SignalHistory.signal_id, SignalHistory.resolved_success)
-            .where(SignalHistory.signal_id.in_(signal_ids))
-            .where(SignalHistory.resolved_success.is_not(None))
-            .order_by(SignalHistory.created_at.desc())
-        )
-    )
-    out: dict[int, bool | None] = {}
-    for sid, success in rows:
-        key = int(sid or 0)
-        if key and key not in out:
-            out[key] = bool(success) if success is not None else None
-    return out
 
 
 def _precision_for(rows: list[dict[str, Any]], *, decision_key: str, resolved: dict[int, bool | None]) -> float:
