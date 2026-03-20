@@ -248,7 +248,7 @@ def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
     return _run_job_with_guard(
         db,
         job_name="sync_all_platforms",
-        stale_minutes=20,
+        stale_minutes=40,
         run_fn=lambda: CollectorSyncService(db).sync_all(platform=platform),
     )
 
@@ -869,7 +869,12 @@ def stage17_cycle_job(
         result["telegram_sent"] = int(telegram_sent)
         return result
 
-    return _run_job(db, job_name="stage17_cycle", run_fn=_run)
+    return _run_job_with_guard(
+        db,
+        job_name="stage17_cycle",
+        stale_minutes=30,
+        run_fn=_run,
+    )
 
 
 def stage17_batch_job(
@@ -1325,7 +1330,12 @@ def label_signal_history_job(
         }
         return payload
 
-    return _run_job(db, job_name="label_signal_history", run_fn=_run)
+    return _run_job_with_guard(
+        db,
+        job_name="label_signal_history",
+        stale_minutes=40,
+        run_fn=_run,
+    )
 
 
 def label_signal_history_resolution_job(
