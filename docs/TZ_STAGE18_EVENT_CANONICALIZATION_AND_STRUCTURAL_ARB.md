@@ -238,3 +238,50 @@
    - `METACULUS`
 3. Усі acceptance checks мають мати режим `kalshi_optional=true`.
 
+## 16. Аудит Виконання (2026-03-21)
+
+### 16.1 Підтверджено як виконане
+
+1. Міграція Stage18 (`0023`) з полями `event_group_id`, `event_key_version`, `event_key_confidence`.
+2. Canonicalizer інтегрований у sync flow.
+3. Topic weights модуль існує і підключений у divergence scoring.
+4. Structural arb detector існує і підключений у SignalEngine.
+5. Stage18 API routes існують (`event-canonicalization`, `topic-weights`, `structural-arb`, `final-report`, trigger POST).
+6. Beat jobs для Stage18 присутні.
+
+### 16.2 Підтверджено тестами
+
+1. Ключові регресійні набори Stage7/10/11/15/17: `69 passed`.
+2. Базові Stage18 тести (foundation): `4 passed`.
+
+### 16.3 Частково виконано / логічні прогалини
+
+1. Final report Stage18 використовує спрощені критерії й не перевіряє всі KPI з цього ТЗ:
+   - немає перевірки `weighted_divergence_hit_rate >= baseline + 5%`,
+   - немає перевірки `cross_platform_match_recall >= baseline + 20%`,
+   - немає перевірки `stage18_shadow_post_cost_ev_ci_low_80 > 0`,
+   - `no_stage7_stage17_regressions` наразі статично `True` (без фактичного gate-запиту).
+2. Артефакти A/B/C з §11.2 не персистяться окремо автоматично; гарантовано пишеться лише final report JSON.
+3. Structural arb поки не має жорсткої перевірки “mutually exclusive outcomes” на рівні outcome semantics (ризик pseudo-baskets при слабкому grouping).
+4. Topic weights рахуються по `resolved_success` історії загалом; немає явного відсікання по specific strategy cohort (можливий шум для divergence-only weights).
+
+### 16.4 Нові знайдені технічні ризики (з аудиту)
+
+1. Canonicalization collision risk для схожих title/date шаблонів без стабільного external ID.
+2. Structural arb sensitivity до якості `event_group_id`; при помилковому grouping можливі false-positive сигнали.
+3. Reliabilty matrix залежить від sparsity: при малому `n` навіть зі shrinkage можливе “повільне” навчання ваг.
+
+## 17. Недовиконане (чекліст до закриття Stage18)
+
+1. Додати повноцінний acceptance gate в `stage18_final_report` відповідно до §14 цього ТЗ (усі критерії, не спрощений набір).
+2. Додати персист артефактів:
+   - `stage18_event_canonicalization.json`
+   - `stage18_topic_weights.json`
+   - `stage18_structural_arb.json`
+   - `stage18_final_report.md`
+3. Додати outcome-semantics validator для structural arb (щоб гарантувати взаємовиключність legs).
+4. Додати окремий Stage18 regression suite:
+   - canonicalization recall/precision smoke,
+   - topic-weights stability checks,
+   - structural-arb false-positive guard tests.
+5. Інтегрувати реальну перевірку “no regressions” (виклик/читання результату тестового gate), замість статичного `True`.

@@ -956,7 +956,7 @@ def stage18_track_job(db: Session) -> dict:
         from app.services.research.stage18_report import build_stage18_final_report
         settings = get_settings()
         return build_stage18_final_report(db, settings=settings)
-    return _run_job(db, job_name="stage18_track", run_fn=_run)
+    return _run_job_with_guard(db, job_name="stage18_track", stale_minutes=180, run_fn=_run)
 
 
 def quality_snapshot_job(db: Session) -> dict:

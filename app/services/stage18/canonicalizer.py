@@ -59,7 +59,7 @@ def _short_hash(s: str, length: int = 12) -> str:
 
 def _extract_primary_key(market: Market) -> str | None:
     """Extract stable external ID from source_payload."""
-    payload = market.source_payload or {}
+    payload = market.source_payload if isinstance(market.source_payload, dict) else {}
     # Polymarket
     cond_id = payload.get("conditionId") or payload.get("condition_id")
     if cond_id:
@@ -115,14 +115,10 @@ def build_canonical_key(market: Market) -> CanonicalKeyResult:
         secondary_parts.append(date_hints)
     secondary = "|".join(secondary_parts)
 
-    if primary:
-        # With a primary key we still group by normalized title so events
-        # from different platforms cluster together.
-        group_seed = norm_title or primary
-        confidence = 1.0
-    else:
-        group_seed = secondary
-        confidence = 0.8 if norm_title else 0.3
+    # Always include date hints in grouping seed to avoid collapsing
+    # yearly-recurring markets with similar titles.
+    group_seed = secondary or primary or ""
+    confidence = 1.0 if primary else (0.8 if norm_title else 0.3)
 
     event_group_id = _short_hash(group_seed)
 
@@ -159,8 +155,6 @@ def backfill_canonical_keys(db, *, batch_size: int = 500) -> dict[str, int]:
 
     total = 0
     updated = 0
-    offset = 0
-
     while True:
         rows = list(
             db.scalars(
@@ -171,7 +165,6 @@ def backfill_canonical_keys(db, *, batch_size: int = 500) -> dict[str, int]:
                 )
                 .order_by(_Market.id)
                 .limit(batch_size)
-                .offset(offset)
             )
         )
         if not rows:
@@ -184,7 +177,6 @@ def backfill_canonical_keys(db, *, batch_size: int = 500) -> dict[str, int]:
         db.flush()
         if len(rows) < batch_size:
             break
-        offset += batch_size
 
     db.commit()
     return {"total_processed": total, "updated": updated, "key_version": _KEY_VERSION}
