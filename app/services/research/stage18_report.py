@@ -87,7 +87,7 @@ def build_stage18_event_canonicalization_report(
     # Target: +20% absolute improvement over title-only baseline (assumed 0).
     # Since we measure coverage not head-to-head recall, we track this as a
     # directional metric: any multi-platform grouping is positive signal.
-    cross_platform_recall_ok = cross_platform_recall_proxy >= 0.0  # non-zero groups = improvement
+    cross_platform_recall_ok = multi_platform_groups > 0 and cross_platform_recall_proxy >= 0.05
 
     report = {
         "generated_at": datetime.now(UTC).isoformat(),

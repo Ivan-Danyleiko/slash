@@ -8,7 +8,7 @@ No real orders are sent — purely simulated P&L tracking.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import json
@@ -26,6 +26,7 @@ from app.models.models import (
     Market,
     Signal,
     Stage7AgentDecision,
+    Stage8Decision,
 )
 from app.services.dryrun.kelly import kelly_fraction, portfolio_kelly_adjustment
 from app.services.dryrun.scorer import composite_score
@@ -388,7 +389,9 @@ def _get_token_id(market: Market) -> str | None:
     return None
 
 
-def _load_latest_keep_rows(db: Session, *, limit: int) -> list[tuple[Signal, Stage7AgentDecision, Market]]:
+def _load_latest_keep_rows(
+    db: Session, *, limit: int, include_divergence: bool = False
+) -> list[tuple[Signal, Stage7AgentDecision, Market]]:
     """Load candidate rows using only the latest Stage7 decision per signal."""
     latest_ids = (
         select(
@@ -399,6 +402,9 @@ def _load_latest_keep_rows(db: Session, *, limit: int) -> list[tuple[Signal, Sta
         .subquery()
     )
     latest = aliased(Stage7AgentDecision)
+    eligible_types = [SignalType.ARBITRAGE_CANDIDATE]
+    if include_divergence:
+        eligible_types.append(SignalType.DIVERGENCE)
     return list(
         db.execute(
             select(Signal, latest, Market)
@@ -406,8 +412,9 @@ def _load_latest_keep_rows(db: Session, *, limit: int) -> list[tuple[Signal, Sta
             .join(latest, latest.id == latest_ids.c.latest_id)
             .join(Market, Market.id == Signal.market_id)
             .where(
-                Signal.signal_type == SignalType.ARBITRAGE_CANDIDATE,
+                Signal.signal_type.in_(eligible_types),
                 latest.decision == "KEEP",
+                latest.created_at >= datetime.now(UTC) - timedelta(hours=48),
                 or_(
                     Market.best_ask_yes.is_not(None),
                     Market.best_bid_yes.is_not(None),
@@ -440,7 +447,10 @@ def _scan_signal_candidates(db: Session) -> dict[str, Any]:
     portfolio = get_or_create_portfolio(db)
     now = datetime.now(UTC)
 
-    rows = _load_latest_keep_rows(db, limit=300)
+    _settings = get_settings()
+    rows = _load_latest_keep_rows(
+        db, limit=300, include_divergence=bool(_settings.dryrun_divergence_signals_enabled)
+    )
     row_map = {int(signal.id): (signal, s7, market) for signal, s7, market in rows}
 
     open_market_ids: set[int] = set(
@@ -579,8 +589,9 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
       - Stage7 decision = KEEP  (AI agent approved)
       - Signal type = ARBITRAGE_CANDIDATE
       - Market has best_ask_yes price
-      Stage8 EXECUTE_ALLOWED is NOT required — Stage8 is a live-trading safety
-      gate; for paper trading we bypass it and use Stage7 directly.
+      Stage8 is a soft gate: if a Stage8 decision exists and is NOT
+      EXECUTE_ALLOWED, the position is skipped. If no Stage8 decision exists,
+      the position proceeds (Stage7 approval is sufficient).
     """
     portfolio = get_or_create_portfolio(db)
     opened = 0
@@ -652,6 +663,18 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         if market.id in open_market_ids:
             skipped += 1
             reasons.append(f"signal {signal.id}: duplicate open market")
+            continue
+
+        # Soft Stage8 gate: if a Stage8 decision exists and is not EXECUTE_ALLOWED, skip.
+        s8_row = db.scalar(
+            select(Stage8Decision)
+            .where(Stage8Decision.signal_id == signal.id)
+            .order_by(Stage8Decision.id.desc())
+            .limit(1)
+        )
+        if s8_row is not None and str(s8_row.execution_action or "").upper() != "EXECUTE_ALLOWED":
+            skipped += 1
+            reasons.append(f"signal {signal.id}: stage8 blocked ({s8_row.execution_action})")
             continue
 
         direction = str(cand.get("direction") or _resolve_trade_direction(signal)).upper()
@@ -974,15 +997,24 @@ def check_resolutions(db: Session) -> dict[str, Any]:
             except (TypeError, ValueError):
                 won = str(res_val).lower() in ("yes", "1", "true") if pos.direction == "YES" else str(res_val).lower() in ("no", "0", "false")
         else:
-            # Cancelled / no resolution value — return capital
-            pos.realized_pnl_usd = 0.0
-            portfolio.current_cash_usd += pos.notional_usd
-            pos.status = "CLOSED"
-            pos.close_reason = "cancelled"
-            pos.closed_at = now
-            pos.updated_at = now
-            portfolio.updated_at = now
-            resolved_count += 1
+            # No resolutionValue — try extract_resolved_probability before treating as cancelled
+            from app.utils.market_resolve import extract_resolved_probability
+            prob = extract_resolved_probability(market)
+            if prob is not None:
+                res_float = prob
+                won = (pos.direction == "YES" and res_float >= 0.5) or (
+                    pos.direction == "NO" and res_float < 0.5
+                )
+            else:
+                # Truly cancelled / no outcome — return capital
+                pos.realized_pnl_usd = 0.0
+                portfolio.current_cash_usd += pos.notional_usd
+                pos.status = "CLOSED"
+                pos.close_reason = "cancelled"
+                pos.closed_at = now
+                pos.updated_at = now
+                portfolio.updated_at = now
+                resolved_count += 1
             continue
 
         if won:

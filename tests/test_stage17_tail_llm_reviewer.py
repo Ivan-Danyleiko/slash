@@ -62,7 +62,8 @@ def test_tail_llm_reviewer_returns_cached_result_when_real_calls_disabled() -> N
         market_prob=0.07,
         our_prob=0.03,
     )
-    assert a["decision"] == "KEEP"
+    # With stage7_agent_real_calls_enabled=False, the fallback returns SKIP (safe default).
+    assert a["decision"] == "SKIP"
     assert a["direction"] in {"YES", "NO"}
     assert a["input_hash"] == b["input_hash"]
     assert b["cache_hit"] is True

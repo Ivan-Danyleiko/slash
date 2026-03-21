@@ -358,6 +358,10 @@ class Settings(BaseSettings):
         default=0.05,
         alias="DRYRUN_CROSS_PLATFORM_MIN_DIFF",
     )
+    dryrun_divergence_signals_enabled: bool = Field(
+        default=False,
+        alias="DRYRUN_DIVERGENCE_SIGNALS_ENABLED",
+    )
     stage7_openai_api_base_url: str = Field(
         default="https://api.openai.com/v1",
         alias="STAGE7_OPENAI_API_BASE_URL",

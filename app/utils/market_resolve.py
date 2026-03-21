@@ -42,7 +42,12 @@ def is_market_resolved(market: "Market", *, now: datetime | None = None) -> bool
     if any(token in status for token in ("resolved", "settled", "final", "ended")):
         return True
     if "closed" in status:
-        return True
+        # "closed" without outcome evidence is not yet resolved (market may still be settling).
+        has_outcome = any(
+            payload.get(k) is not None
+            for k in ("resolution", "resolvedOutcome", "outcome", "result", "resolutionProbability")
+        )
+        return has_outcome
 
     if isinstance(payload.get("isResolved"), bool) and payload["isResolved"]:
         return True

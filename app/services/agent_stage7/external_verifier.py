@@ -65,10 +65,13 @@ def build_external_verification(
         market=m,
         runtime_cache=cache,
     )
-    consensus_key = f"consensus:{title}"
+    _event_group_id = str(m.event_group_id or "") if m else ""
+    consensus_key = f"consensus:{_event_group_id or title}"
     consensus = cache.get(consensus_key)
     if consensus is None:
-        consensus = get_cross_platform_consensus(db, title, runtime_cache=cache)
+        consensus = get_cross_platform_consensus(
+            db, title, event_group_id=_event_group_id or None, runtime_cache=cache
+        )
         cache[consensus_key] = consensus
     readiness_gate = cache.get("readiness_gate")
     if readiness_gate is None:

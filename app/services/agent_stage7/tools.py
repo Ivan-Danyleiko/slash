@@ -201,6 +201,7 @@ def get_cross_platform_consensus(
     db: Session,
     event_id: str,
     *,
+    event_group_id: str | None = None,
     runtime_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     with stage7_span("stage7.tool.get_cross_platform_consensus"):
@@ -217,16 +218,32 @@ def get_cross_platform_consensus(
             }
 
         cache = runtime_cache if runtime_cache is not None else {}
-        rows = cache.get("cross_platform_rows_v1")
-        if not isinstance(rows, list):
-            stmt = (
-                select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
-                .join(Platform, Platform.id == Market.platform_id)
-                .order_by(Market.fetched_at.desc())
-                .limit(400)
-            )
-            rows = list(db.execute(stmt))
-            cache["cross_platform_rows_v1"] = rows
+
+        # Stage18: when event_group_id is set, query by group directly instead of scanning limit(400).
+        grp = str(event_group_id or "").strip()
+        if grp:
+            cache_key = f"cross_platform_rows_group:{grp}"
+            rows = cache.get(cache_key)
+            if not isinstance(rows, list):
+                stmt = (
+                    select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
+                    .join(Platform, Platform.id == Market.platform_id)
+                    .where(Market.event_group_id == grp)
+                    .order_by(Market.fetched_at.desc())
+                )
+                rows = list(db.execute(stmt))
+                cache[cache_key] = rows
+        else:
+            rows = cache.get("cross_platform_rows_v1")
+            if not isinstance(rows, list):
+                stmt = (
+                    select(Platform.name, Market.title, Market.probability_yes, Market.volume_24h, Market.open_interest)
+                    .join(Platform, Platform.id == Market.platform_id)
+                    .order_by(Market.fetched_at.desc())
+                    .limit(400)
+                )
+                rows = list(db.execute(stmt))
+                cache["cross_platform_rows_v1"] = rows
         best: dict[str, tuple[float, float, float]] = {}
         for platform_name, candidate_title, candidate_prob, candidate_volume, candidate_oi in rows:
             if not isinstance(candidate_prob, (int, float)):

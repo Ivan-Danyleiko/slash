@@ -270,7 +270,9 @@ class SignalEngine:
                 plat_b = platform_by_id_cache.get(market_b.platform_id, "UNKNOWN")
                 w_a = get_platform_weight(topic_weights, plat_a, market_a.category)
                 w_b = get_platform_weight(topic_weights, plat_b, market_b.category)
-                divergence_detector.weighted_divergence_score(market_a, market_b, w_a, w_b)
+                w_score = divergence_detector.weighted_divergence_score(market_a, market_b, w_a, w_b)
+                if w_score is not None:
+                    pair.divergence_score = w_score
 
             if self.settings.signal_divergence_use_executable:
                 threshold_value = exec_res.net_edge_after_costs if exec_res is not None else None
@@ -1533,11 +1535,13 @@ class SignalEngine:
         # Hard risk cap: single tail position cannot exceed 5% reference balance.
         notional_usd = min(max(0.05, raw_notional), ref_balance * 0.05)
 
+        from app.services.stage17.tail_executor import _is_external_api_degraded
+        _api_degraded, _api_reason = _is_external_api_degraded(self.db)
         blocked, _reason = check_tail_circuit_breaker(
             self.db,
             settings=self.settings,
             balance_usd=ref_balance,
-            api_status={"degraded": False},
+            api_status={"degraded": _api_degraded},
         )
         if blocked:
             return {

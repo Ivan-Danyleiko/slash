@@ -115,7 +115,7 @@ def review_tail_narrative(
     if fallback_direction not in {"YES", "NO"}:
         fallback_direction = "YES"
     fallback = {
-        "decision": "KEEP",
+        "decision": "SKIP",
         "direction": fallback_direction,
         "confidence_adjustment": 0.0,
         "reason_codes": ["tail_llm_unavailable_fallback"],
