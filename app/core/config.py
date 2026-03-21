@@ -380,6 +380,7 @@ class Settings(BaseSettings):
     )
     stage7_openrouter_http_referer: str = Field(default="", alias="STAGE7_OPENROUTER_HTTP_REFERER")
     stage7_openrouter_x_title: str = Field(default="prediction-market-scanner", alias="STAGE7_OPENROUTER_X_TITLE")
+    stage7_openrouter_enabled: bool = Field(default=True, alias="STAGE7_OPENROUTER_ENABLED")
     signal_history_retention_days: int = Field(default=90, alias="SIGNAL_HISTORY_RETENTION_DAYS")
     signal_labeling_tolerance_minutes: int = Field(default=10, alias="SIGNAL_LABELING_TOLERANCE_MINUTES")
     signal_labeling_horizon_lag_hours: float = Field(default=2.0, alias="SIGNAL_LABELING_HORIZON_LAG_HOURS")

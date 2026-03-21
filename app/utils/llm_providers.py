@@ -34,7 +34,7 @@ def build_provider_chain(settings: "Settings") -> list[dict[str, Any]]:
             "timeout": timeout,
         })
 
-    if str(settings.openrouter_api_key or "").strip():
+    if str(settings.openrouter_api_key or "").strip() and bool(getattr(settings, "stage7_openrouter_enabled", True)):
         headers: dict[str, str] = {}
         if str(settings.stage7_openrouter_http_referer or "").strip():
             headers["HTTP-Referer"] = str(settings.stage7_openrouter_http_referer).strip()

@@ -12,6 +12,14 @@ from app.services.agent_stage7.stack_adapters.plain_api_adapter import PlainApiA
 
 logger = logging.getLogger(__name__)
 
+# Provider cooldown: keyed by adapter.name → monotonic timestamp when cooldown expires.
+# Set after 429 (rate-limit) or 402 (billing/quota) to avoid retry storms.
+_PROVIDER_COOLDOWN: dict[str, float] = {}
+_COOLDOWN_SECONDS = 900.0  # 15 minutes
+
+# HTTP status codes that trigger a cooldown for that provider.
+_COOLDOWN_STATUS_CODES = {"429", "402"}
+
 
 class FallbackAdapter:
     """Tries a list of adapters in order, skipping those that return error reason_codes."""
@@ -29,18 +37,40 @@ class FallbackAdapter:
             "provider_fingerprint": "fallback_chain",
             "simulated_latency_ms": 0.0,
         }
+        now = time.monotonic()
         for adapter in self._adapters:
+            # Skip providers that are on cooldown after 429/402.
+            cooldown_until = _PROVIDER_COOLDOWN.get(adapter.name, 0.0)
+            if now < cooldown_until:
+                remaining = int(cooldown_until - now)
+                logger.info("stage7_provider_cooldown skipping %s for %ds", adapter.name, remaining)
+                continue
+
             result = adapter.decide(payload)
             reason = str((result.get("reason_codes") or [""])[0])
             is_error = any(reason.startswith(code) for code in self._ERROR_CODES)
             if not is_error:
                 return result
+
             logger.warning("stage7_fallback skipping %s reason=%s", adapter.name, reason)
+
+            # Set cooldown when provider returns 429 (rate-limit) or 402 (billing/quota).
+            status_code = reason.split(":")[-1] if ":" in reason else ""
+            if status_code in _COOLDOWN_STATUS_CODES:
+                retry_after = float(result.get("retry_after_seconds") or 0.0)
+                cooldown = max(_COOLDOWN_SECONDS, retry_after)
+                _PROVIDER_COOLDOWN[adapter.name] = time.monotonic() + cooldown
+                logger.warning(
+                    "stage7_provider_cooldown set %s for %.0fs (status=%s)",
+                    adapter.name, cooldown, status_code,
+                )
+            else:
+                # Honor short Retry-After for other errors (max 10s to avoid blocking).
+                retry_after = float(result.get("retry_after_seconds") or 0.0)
+                if 0 < retry_after <= 10.0:
+                    time.sleep(retry_after)
+
             last_result = result
-            # Honor Retry-After before trying next provider (max 10s to avoid blocking too long).
-            retry_after = float(result.get("retry_after_seconds") or 0.0)
-            if 0 < retry_after <= 10.0:
-                time.sleep(retry_after)
         return last_result
 
 
@@ -122,7 +152,7 @@ def _build_all_adapters(settings: Settings) -> list[Stage7Adapter]:
         ))
 
     openrouter_key = str(settings.openrouter_api_key or "").strip()
-    if openrouter_key:
+    if openrouter_key and bool(getattr(settings, "stage7_openrouter_enabled", True)):
         extra: dict[str, str] = {}
         if str(settings.stage7_openrouter_http_referer or "").strip():
             extra["HTTP-Referer"] = str(settings.stage7_openrouter_http_referer).strip()
