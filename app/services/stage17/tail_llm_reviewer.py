@@ -155,10 +155,10 @@ def review_tail_narrative(
             )
             text = _extract_response_text(resp)
             parsed = _parse_json_payload(text) or {}
-            decision = str(parsed.get("decision") or "KEEP").upper()
+            decision = str(parsed.get("decision") or "SKIP").upper()
             direction = str(parsed.get("direction") or fallback_direction).upper()
             if decision not in {"KEEP", "SKIP"}:
-                decision = "KEEP"
+                decision = "SKIP"
             if direction not in {"YES", "NO"}:
                 direction = fallback_direction
             conf_adj = float(parsed.get("confidence_adjustment") or 0.0)

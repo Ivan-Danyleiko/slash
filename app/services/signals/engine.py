@@ -263,17 +263,6 @@ class SignalEngine:
             if gross is not None and gross >= self.settings.signal_divergence_threshold:
                 flagged_gross += 1
 
-            # Stage18: compute weighted divergence and store in pair metadata
-            if topic_weights and gross is not None:
-                from app.services.stage18.topic_weights import get_platform_weight
-                plat_a = platform_by_id_cache.get(market_a.platform_id, "UNKNOWN")
-                plat_b = platform_by_id_cache.get(market_b.platform_id, "UNKNOWN")
-                w_a = get_platform_weight(topic_weights, plat_a, market_a.category)
-                w_b = get_platform_weight(topic_weights, plat_b, market_b.category)
-                w_score = divergence_detector.weighted_divergence_score(market_a, market_b, w_a, w_b)
-                if w_score is not None:
-                    pair.divergence_score = w_score
-
             if self.settings.signal_divergence_use_executable:
                 threshold_value = exec_res.net_edge_after_costs if exec_res is not None else None
                 pair.divergence_score = threshold_value
@@ -284,6 +273,18 @@ class SignalEngine:
                 pair.divergence_score = gross
                 if gross is not None and gross >= self.settings.signal_divergence_threshold:
                     flagged += 1
+
+            # Stage18: override divergence_score with topic-weighted score when available.
+            # Placed after standard assignments so weighted score takes precedence.
+            if topic_weights and gross is not None:
+                from app.services.stage18.topic_weights import get_platform_weight
+                plat_a = platform_by_id_cache.get(market_a.platform_id, "UNKNOWN")
+                plat_b = platform_by_id_cache.get(market_b.platform_id, "UNKNOWN")
+                w_a = get_platform_weight(topic_weights, plat_a, market_a.category)
+                w_b = get_platform_weight(topic_weights, plat_b, market_b.category)
+                w_score = divergence_detector.weighted_divergence_score(market_a, market_b, w_a, w_b)
+                if w_score is not None:
+                    pair.divergence_score = w_score
 
         self.db.commit()
         return {

@@ -651,6 +651,22 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
     for key in list(bucket_open_notional_pct.keys()):
         bucket_open_notional_pct[key] /= max(float(portfolio.initial_balance_usd), 1.0)
 
+    # Batch-preload Stage8 decisions for all candidates (avoid N+1 queries).
+    candidate_signal_ids = [
+        int(cand.get("signal_id") or 0) for cand in accepted_scored if cand.get("signal_id")
+    ]
+    _s8_rows_all = list(
+        db.scalars(
+            select(Stage8Decision)
+            .where(Stage8Decision.signal_id.in_(candidate_signal_ids))
+            .order_by(Stage8Decision.id.desc())
+        )
+    ) if candidate_signal_ids else []
+    # Keep only the latest decision per signal.
+    _s8_by_signal: dict[int, Stage8Decision] = {}
+    for _s8r in reversed(_s8_rows_all):
+        _s8_by_signal[int(_s8r.signal_id)] = _s8r
+
     cross_prob_cache: dict[int, dict[str, Any] | None] = {}
     for cand in accepted_scored:
         sid = int(cand.get("signal_id") or 0)
@@ -666,12 +682,7 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             continue
 
         # Soft Stage8 gate: if a Stage8 decision exists and is not EXECUTE_ALLOWED, skip.
-        s8_row = db.scalar(
-            select(Stage8Decision)
-            .where(Stage8Decision.signal_id == signal.id)
-            .order_by(Stage8Decision.id.desc())
-            .limit(1)
-        )
+        s8_row = _s8_by_signal.get(int(signal.id))
         if s8_row is not None and str(s8_row.execution_action or "").upper() != "EXECUTE_ALLOWED":
             skipped += 1
             reasons.append(f"signal {signal.id}: stage8 blocked ({s8_row.execution_action})")
@@ -1015,7 +1026,7 @@ def check_resolutions(db: Session) -> dict[str, Any]:
                 pos.updated_at = now
                 portfolio.updated_at = now
                 resolved_count += 1
-            continue
+                continue  # only skip won/loss path for truly cancelled positions
 
         if won:
             # Payout: shares * $1 (binary market resolves to $1)

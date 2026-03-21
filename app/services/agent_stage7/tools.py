@@ -244,11 +244,14 @@ def get_cross_platform_consensus(
                 )
                 rows = list(db.execute(stmt))
                 cache["cross_platform_rows_v1"] = rows
+        # When querying by event_group_id, markets are already known to be the same event —
+        # skip title similarity and accept all rows from that group (similarity = 1.0).
+        use_similarity = not bool(grp)
         best: dict[str, tuple[float, float, float]] = {}
         for platform_name, candidate_title, candidate_prob, candidate_volume, candidate_oi in rows:
             if not isinstance(candidate_prob, (int, float)):
                 continue
-            sim = _title_similarity(title, str(candidate_title or ""))
+            sim = _title_similarity(title, str(candidate_title or "")) if use_similarity else 1.0
             pname = str(platform_name or "").upper()
             prev = best.get(pname)
             if prev is None or sim > prev[0]:
@@ -260,9 +263,12 @@ def get_cross_platform_consensus(
                 market_volume = max(1.0, liquidity_proxy)
                 best[pname] = (sim, float(candidate_prob), market_volume)
 
+        # When queried by event_group_id, similarity is 1.0 for all rows — no threshold needed.
+        _sim_threshold = 0.40 if use_similarity else 0.0
+
         def _pick(name: str) -> tuple[float | None, float]:
             item = best.get(name)
-            if item is None or item[0] < 0.40:
+            if item is None or item[0] < _sim_threshold:
                 return None, 0.0
             return float(item[1]), float(item[2])
 

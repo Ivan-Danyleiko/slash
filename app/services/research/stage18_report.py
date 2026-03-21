@@ -298,12 +298,10 @@ def build_stage18_final_report(
     # 1. event_group_coverage >= 0.70
     c1 = bool(canon_report.get("coverage_ok", False))
 
-    # 2. cross_platform_match_recall >= baseline + 20%
-    #    Proxy: any multi-platform event groups exist (baseline = 0).
-    #    Marked "insufficient_data" when no groups exist yet.
+    # 2. cross_platform_match_recall >= baseline + 5% (proxy >= 0.05, multi_platform_groups > 0)
     multi_groups = int(canon_report.get("multi_platform_groups") or 0)
-    c2 = multi_groups > 0
-    c2_note = f"multi_platform_groups={multi_groups}"
+    c2 = bool(canon_report.get("cross_platform_recall_ok", False))
+    c2_note = f"multi_platform_groups={multi_groups}, cross_platform_recall_ok={c2}"
 
     # 3. weighted_divergence_hit_rate >= baseline + 5%
     #    Measured when >= 30 resolved divergence signals exist.
