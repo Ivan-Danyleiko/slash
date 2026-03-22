@@ -378,7 +378,7 @@ def signal_push_job(db: Session) -> dict:
                     if slippage_edge == 0.0 and expected_edge != 0.0:
                         slippage_edge = expected_edge
                     min_edge_after_costs = 0.005
-                    min_utility = max(float(settings.signal_top_min_utility_score), 0.01)
+                    min_utility = float(settings.signal_top_min_utility_score)
                     if slippage_edge <= min_edge_after_costs:
                         _skip("edge_after_costs_too_low")
                         continue
