@@ -180,11 +180,12 @@ class TelegramProductService:
         rows = list(self.db.scalars(stmt.offset(offset).limit(page_size)))
         return rows
 
-    def daily_digest(self, user: User) -> str:
-        """Returns MarkdownV2-formatted daily digest."""
+    def build_daily_digest(self, user: User) -> str | None:
+        """Build MarkdownV2 digest text. Returns None if already sent today (idempotent check).
+        Does NOT write to DB — call mark_digest_sent() after confirmed delivery."""
         settings = get_settings()
         if user.last_digest_sent and user.last_digest_sent.date() == date.today():
-            return "📬 Щоденний огляд вже надіслано сьогодні\\."
+            return None
         top_div = list(self.db.scalars(
             select(Signal).where(Signal.divergence_score.is_not(None))
             .order_by(Signal.divergence_score.desc()).limit(3)
@@ -226,12 +227,23 @@ class TelegramProductService:
         else:
             lines.append("• Немає сповіщень по вотчлісту")
 
+        return "\n".join(lines)
+
+    def mark_digest_sent(self, user: User) -> None:
+        """Record digest delivery in DB. Call only after Telegram confirmed delivery."""
         user.last_digest_sent = datetime.now(UTC)
         variant = get_ab_variant_for_user(user_id=user.id)
         payload = {"variant": variant} if variant else None
         self.db.add(UserEvent(user_id=user.id, event_type="digest_sent", payload_json=payload))
         self.db.commit()
-        return "\n".join(lines)
+
+    def daily_digest(self, user: User) -> str:
+        """Legacy wrapper for /digest command (bot handler). Marks sent immediately."""
+        text = self.build_daily_digest(user)
+        if text is None:
+            return "📬 Щоденний огляд вже надіслано сьогодні\\."
+        self.mark_digest_sent(user)
+        return text
 
     def can_send_signal(self, user: User, requested: int = 1) -> bool:
         limit = PLAN_LIMITS[user.access_level]["signals"]

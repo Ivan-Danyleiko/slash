@@ -308,18 +308,25 @@ def daily_digest_job(db: Session) -> dict:
         from app.services.telegram_delivery import send_message as _tg_send_digest
         sent = 0
         skipped = 0
+        already_sent = 0
         for user in all_users:
             if user.subscription_status != SubscriptionStatus.ACTIVE:
                 skipped += 1
                 continue
-            text = svc.daily_digest(user)
+            text = svc.build_daily_digest(user)
+            if text is None:
+                already_sent += 1
+                continue
             if token and user.telegram_user_id:
                 ok = _tg_send_digest(token, str(user.telegram_user_id), text, parse_mode="MarkdownV2")
                 if ok:
+                    svc.mark_digest_sent(user)
                     sent += 1
             else:
-                sent += 1  # no token configured — count as "processed" for ops visibility
-        return {"digests_sent": sent, "skipped_non_active": skipped}
+                # no token configured — mark as sent anyway (local/dev mode)
+                svc.mark_digest_sent(user)
+                sent += 1
+        return {"digests_sent": sent, "skipped_non_active": skipped, "already_sent_today": already_sent}
 
     return _run_job(db, job_name="daily_digest", run_fn=_run)
 
