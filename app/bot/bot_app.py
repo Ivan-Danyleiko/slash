@@ -14,23 +14,13 @@ from app.db.session import SessionLocal
 from app.models.enums import AccessLevel, SignalType, SubscriptionStatus
 from app.models.models import Market, Signal, User
 from app.services.dryrun.simulator import check_resolutions, refresh_mark_prices, run_simulation_cycle
+from app.services.telegram_i18n import esc as _mv2
 from app.services.telegram_product import TelegramProductService
+from app.services.telegram_templates import render_start, render_help, render_plans, render_me
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 dp = Dispatcher()
-
-# ---------------------------------------------------------------------------
-# MarkdownV2 escape helper
-# ---------------------------------------------------------------------------
-_MV2_SPECIAL = r"\_*[]()~`>#+-=|{}.!"
-
-
-def _mv2(text: str) -> str:
-    """Escape text for Telegram MarkdownV2."""
-    for ch in _MV2_SPECIAL:
-        text = text.replace(ch, f"\\{ch}")
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -100,39 +90,27 @@ async def _err(message: Message, exc: Exception) -> None:
 async def cmd_start(message: Message) -> None:
     try:
         _upsert_user(message)
-        text = (
-            "Welcome to Prediction Market Scanner\n\n"
-            "Finds unusual prediction markets across platforms.\n\n"
-            "You will receive:\n"
-            "• arbitrage candidates\n"
-            "• price divergences\n"
-            "• duplicate markets\n"
-            "• rule risks\n\n"
-            "Commands:\n"
-            "/top — best signals now\n"
-            "/signals — latest signals\n"
-            "/watchlist — track markets\n"
-            "/digest — today summary\n"
-            "/me — your profile"
-        )
-        if _is_admin(message):
-            text += "\n\nAdmin:\n/portfolio — dry-run balance\n/positions — open trades\n/pnl — performance stats\n/dryrun — run simulation now\n/refresh — update mark prices"
-        await message.answer(text)
+        text = render_start(is_admin=_is_admin(message))
+        await message.answer(text, parse_mode="MarkdownV2")
     except Exception as exc:
         await _err(message, exc)
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    text = "/plans /signals /top /watchlist /add /remove /digest /me"
-    if _is_admin(message):
-        text += "\nAdmin: /portfolio /positions /pnl"
-    await message.answer(text)
+    try:
+        text = render_help(is_admin=_is_admin(message))
+        await message.answer(text, parse_mode="MarkdownV2")
+    except Exception as exc:
+        await _err(message, exc)
 
 
 @dp.message(Command("plans"))
 async def cmd_plans(message: Message) -> None:
-    await message.answer("FREE, PRO, PREMIUM (payments TBD)")
+    try:
+        await message.answer(render_plans(), parse_mode="MarkdownV2")
+    except Exception as exc:
+        await _err(message, exc)
 
 
 @dp.message(Command("signals"))
@@ -296,12 +274,17 @@ async def cmd_digest(message: Message) -> None:
 @dp.message(Command("me"))
 async def cmd_me(message: Message) -> None:
     try:
+        from app.services.telegram_product import PLAN_LIMITS
         user = _upsert_user(message)
-        await message.answer(
-            f"User: {user.username or 'n/a'}\n"
-            f"Level: {user.access_level.value}\n"
-            f"Status: {user.subscription_status.value}"
+        signals_limit = PLAN_LIMITS[user.access_level]["signals"]
+        text = render_me(
+            username=user.username,
+            access_level=user.access_level.value,
+            subscription_status=user.subscription_status.value,
+            signals_sent_today=user.signals_sent_today,
+            signals_limit=signals_limit,
         )
+        await message.answer(text, parse_mode="MarkdownV2")
     except Exception as exc:
         await _err(message, exc)
 

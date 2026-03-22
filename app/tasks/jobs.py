@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.secrets import redact_text
-from app.models.enums import SignalType
+from app.models.enums import SignalType, SubscriptionStatus
 from app.models.models import (
     DryrunPosition,
     JobRun,
@@ -49,30 +49,20 @@ from app.services.stage17.tail_executor import run_stage17_tail_cycle
 from app.services.research.tracking import record_stage5_experiment
 from app.services.signals.engine import SignalEngine
 from app.services.signals.ranking import rank_score, select_top_signals
+from app.services.telegram_delivery import send_message as _tg_send, send_to_chat
+from app.services.telegram_i18n import esc as _escape_markdown_v2, signal_type_ua as _signal_type_ua
 from app.services.telegram_product import TelegramProductService
+from app.services.telegram_templates import (
+    render_signal_push,
+    render_stage17_open,
+    render_stage17_win,
+    render_stage17_daily,
+)
 from app.utils.market_resolve import is_market_resolved as _market_is_resolved
-
-_STAGE17_CATEGORY_EMOJI = {
-    "price_target": "💰",
-    "crypto_level": "💰",
-    "sports_match": "🏆",
-    "geopolitical_event": "🌍",
-    "election": "🗳️",
-    "earnings_surprise": "📈",
-    "regulatory": "⚖️",
-    "company_valuation": "🏢",
-}
 
 
 def _as_obj_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
-
-
-def _escape_markdown_v2(text: str) -> str:
-    out = str(text)
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        out = out.replace(ch, f"\\{ch}")
-    return out
 
 
 def _send_stage17_telegram_messages(settings, messages: list[str]) -> int:
@@ -80,45 +70,15 @@ def _send_stage17_telegram_messages(settings, messages: list[str]) -> int:
     chat_id = str(settings.telegram_chat_id or "").strip()
     if not token or not chat_id:
         return 0
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    sent = 0
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            for text in messages:
-                try:
-                    resp = client.post(
-                        url,
-                        json={"chat_id": chat_id, "text": str(text), "disable_web_page_preview": True},
-                    )
-                    if int(resp.status_code) == 200:
-                        sent += 1
-                except Exception:  # noqa: BLE001
-                    continue
-    except Exception:  # noqa: BLE001
-        return sent
-    return sent
+    return send_to_chat(token, chat_id, messages, parse_mode="MarkdownV2")
 
 
 def _build_stage17_open_message(item: dict) -> str:
-    category = str(item.get("tail_category") or "")
-    emoji = _STAGE17_CATEGORY_EMOJI.get(category, "🔥")
-    koef = float(item.get("koef") or 0.0)
-    our_pct = 100.0 * float(item.get("our_prob") or 0.0)
-    mkt_pct = 100.0 * float(item.get("market_prob") or 0.0)
-    bet = float(item.get("notional_usd") or 0.0)
-    platform = str(item.get("platform") or "Unknown")
-    days_to_resolution = int(item.get("days_to_resolution") or 0)
-    return (
-        "🔥 STAGE17 OPEN\n"
-        f"{item.get('title')}\n"
-        f"{emoji} {category} · {platform} · {days_to_resolution} днів\n"
-        f"Koef x{koef:.2f} · our {our_pct:.1f}% vs mkt {mkt_pct:.1f}%\n"
-        f"bet=${bet:.2f}"
-    )
+    return render_stage17_open(item)
 
 
 def _build_stage17_win_message(item: dict) -> str:
-    return f"🎉 WIN x{item.get('koef')}: {item.get('title')} | +${item.get('profit_usd')}"
+    return render_stage17_win(item)
 
 
 def _cleanup_stale_running_jobs(
@@ -340,86 +300,90 @@ def signal_push_job(db: Session) -> dict:
             return {"signals_prepared": 0, "signals_sent": 0, "note": "bot token missing"}
 
         svc = TelegramProductService(db)
-        users = list(db.scalars(select(User)))
+        # Skip INACTIVE users — they opted out or never subscribed
+        users = [
+            u for u in db.scalars(select(User))
+            if u.subscription_status != SubscriptionStatus.INACTIVE
+        ]
         sent = 0
         prepared = 0
         skipped_by_reason: dict[str, int] = {}
         now = datetime.now(UTC)
+        token = str(settings.telegram_bot_token or "")
 
         def _skip(reason: str) -> None:
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
 
         # Pre-load signal pool + market map once — avoids N+1 in user loops.
         signal_pool, markets_by_id = svc.load_signal_pool_with_markets()
-        tg_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
-        with httpx.Client(timeout=10.0) as client:
-            for user in users:
-                top = svc.top_ranked_signals(
-                    user=user,
-                    limit=5,
-                    pool=signal_pool,
-                    log_variant_event=False,
-                )
-                top = [s for s in top if rank_score(s) > 0.1][:5]
-                for signal in top:
-                    if not svc.can_send_signal(user, 1):
-                        break
-                    market = markets_by_id.get(int(signal.market_id or 0))
-                    if not market:
-                        _skip("market_missing")
+        for user in users:
+            top = svc.top_ranked_signals(
+                user=user,
+                limit=5,
+                pool=signal_pool,
+                log_variant_event=False,
+            )
+            top = [s for s in top if rank_score(s) > 0.1][:5]
+            for signal in top:
+                if not svc.can_send_signal(user, 1):
+                    break
+                market = markets_by_id.get(int(signal.market_id or 0))
+                if not market:
+                    _skip("market_missing")
+                    continue
+                if _market_is_resolved(market, now=now):
+                    _skip("market_resolved_or_closed")
+                    continue
+                ex = signal.execution_analysis or {}
+                utility = float(ex.get("utility_score") or 0.0)
+                expected_edge = float(ex.get("expected_edge") or 0.0)
+                slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
+                if slippage_edge == 0.0 and expected_edge != 0.0:
+                    slippage_edge = expected_edge
+                min_edge_after_costs = 0.005
+                min_utility = float(settings.signal_top_min_utility_score)
+                if slippage_edge <= min_edge_after_costs:
+                    _skip("edge_after_costs_too_low")
+                    continue
+                if utility <= min_utility:
+                    _skip("utility_too_low")
+                    continue
+                cost_impact = max(0.0, expected_edge - slippage_edge)
+                assumptions = str(ex.get("assumptions_version") or "n/a")
+                if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
+                    metric_label = "Рух ціни"
+                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                    if metric_value <= 0.0:
+                        _skip("recent_move_zero")
                         continue
-                    if _market_is_resolved(market, now=now):
-                        _skip("market_resolved_or_closed")
-                        continue
-                    ex = signal.execution_analysis or {}
-                    utility = float(ex.get("utility_score") or 0.0)
-                    expected_edge = float(ex.get("expected_edge") or 0.0)
-                    slippage_edge = float(ex.get("slippage_adjusted_edge") or 0.0)
-                    if slippage_edge == 0.0 and expected_edge != 0.0:
-                        slippage_edge = expected_edge
-                    min_edge_after_costs = 0.005
-                    min_utility = float(settings.signal_top_min_utility_score)
-                    if slippage_edge <= min_edge_after_costs:
-                        _skip("edge_after_costs_too_low")
-                        continue
-                    if utility <= min_utility:
-                        _skip("utility_too_low")
-                        continue
-                    cost_impact = max(0.0, expected_edge - slippage_edge)
-                    assumptions = str(ex.get("assumptions_version") or "n/a")
-                    if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
-                        metric_label = "Recent move"
-                        metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
-                        if metric_value <= 0.0:
-                            _skip("recent_move_zero")
-                            continue
-                    else:
-                        metric_label = "Divergence"
-                        metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
-                    prepared += 1
+                else:
+                    metric_label = "Розходження"
+                    metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
+                prepared += 1
 
-                    text = (
-                        f"🔥 *{_escape_markdown_v2(signal.signal_type.value)}*\n"
-                        f"{_escape_markdown_v2(signal.title)}\n"
-                        f"Confidence: {_escape_markdown_v2(f'{signal.confidence_score or 0:.2f}')}\n"
-                        f"{_escape_markdown_v2(metric_label)}: {_escape_markdown_v2(f'{metric_value:.1f}%')}\n"
-                        f"Utility \\(exec\\): {_escape_markdown_v2(f'{utility:.3f}')}\n"
-                        f"Edge after costs: {_escape_markdown_v2(f'{slippage_edge:.3f}')} \\(cost impact: {_escape_markdown_v2(f'{cost_impact:.3f}')}\\)\n"
-                        f"Execution assumptions: `{_escape_markdown_v2(assumptions)}`\n"
-                        f"_Disclaimer: {_escape_markdown_v2(settings.research_ethics_disclaimer_text)}_"
-                    )
-                    resp = client.post(
-                        tg_url,
-                        json={
-                            "chat_id": user.telegram_user_id,
-                            "text": text,
-                            "parse_mode": "MarkdownV2",
-                            "disable_web_page_preview": True,
-                        },
-                    )
-                    if resp.status_code == 200:
-                        svc.record_signal_sent(user, signal, commit=False)
-                        sent += 1
+                text = render_signal_push(
+                    signal_type=signal.signal_type.value,
+                    title=signal.title,
+                    confidence=float(signal.confidence_score or 0.0),
+                    metric_label=metric_label,
+                    metric_value=metric_value,
+                    utility=utility,
+                    slippage_edge=slippage_edge,
+                    cost_impact=cost_impact,
+                    assumptions=assumptions,
+                    disclaimer=str(settings.research_ethics_disclaimer_text),
+                    market_url=market.url if market else None,
+                )
+                ok = _tg_send(
+                    token,
+                    str(user.telegram_user_id),
+                    text,
+                    parse_mode="MarkdownV2",
+                    disable_web_page_preview=True,
+                )
+                if ok:
+                    svc.record_signal_sent(user, signal, commit=False)
+                    sent += 1
         if sent > 0:
             db.commit()
         result = {"signals_prepared": prepared, "signals_sent": sent, "skipped_by_reason": skipped_by_reason}
@@ -919,14 +883,7 @@ def stage17_batch_job(
             cycle_limit=cycle_limit,
         )
         summary = ((report.get("reports") or {}).get("stage17_tail_report") or {}).get("summary") or {}
-        digest_text = (
-            "📊 STAGE17 DAILY\n"
-            f"hit_rate={summary.get('hit_rate_tail')}\n"
-            f"roi={summary.get('roi_total')}\n"
-            f"open_positions={summary.get('open_positions')}\n"
-            f"avg_koef={summary.get('avg_koef')}\n"
-            f"final={summary.get('final_decision')}"
-        )
+        digest_text = render_stage17_daily(summary)
         telegram_sent = _send_stage17_telegram_messages(settings, [digest_text])
         report["telegram_sent"] = bool(telegram_sent > 0)
         return report

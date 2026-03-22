@@ -9,6 +9,7 @@ from app.models.enums import AccessLevel, SignalType
 from app.models.models import DryrunPortfolio, DryrunPosition, Market, Signal, User, UserEvent, WatchlistItem
 from app.services.signals.ranking import rank_score, select_top_signals
 from app.services.research.ab_testing import get_ab_variant_for_user
+from app.services.telegram_i18n import esc as _esc_i18n
 
 
 PLAN_LIMITS = {
@@ -183,7 +184,7 @@ class TelegramProductService:
         """Returns MarkdownV2-formatted daily digest."""
         settings = get_settings()
         if user.last_digest_sent and user.last_digest_sent.date() == date.today():
-            return "📬 Daily digest already sent today\\."
+            return "📬 Щоденний огляд вже надіслано сьогодні\\."
         top_div = list(self.db.scalars(
             select(Signal).where(Signal.divergence_score.is_not(None))
             .order_by(Signal.divergence_score.desc()).limit(3)
@@ -196,10 +197,10 @@ class TelegramProductService:
         disclaimer = self._esc(settings.research_ethics_disclaimer_text)
 
         lines = [
-            "📬 *Prediction Markets Daily Digest*",
+            "📬 *Щоденний огляд ринків прогнозів*",
             f"_{disclaimer}_",
             "",
-            "*Top Divergences*",
+            "*Топ розходжень*",
         ]
         if top_div:
             for s in top_div:
@@ -209,21 +210,21 @@ class TelegramProductService:
                 div_pct = self._esc(f"{(s.divergence_score or 0)*100:.1f}%")
                 lines.append(f"• {title} → {div_pct} \\| util={self._esc(f'{util:.3f}')}")
         else:
-            lines.append("• No significant divergences today")
+            lines.append("• Значних розходжень немає")
         lines.append("")
-        lines.append("*Top Weird Markets*")
+        lines.append("*Нетипові ринки*")
         if weird:
             for s in weird:
                 lines.append(f"• {self._esc(s.title[:64])}")
         else:
-            lines.append("• No weird markets detected")
+            lines.append("• Нетипових ринків не виявлено")
         lines.append("")
-        lines.append("*Watchlist Alerts*")
+        lines.append("*Вотчліст*")
         if watch:
             for w in watch:
                 lines.append(f"• {self._esc(w['title'][:64])}")
         else:
-            lines.append("• No watchlist alerts")
+            lines.append("• Немає сповіщень по вотчлісту")
 
         user.last_digest_sent = datetime.now(UTC)
         variant = get_ab_variant_for_user(user_id=user.id)
@@ -257,10 +258,7 @@ class TelegramProductService:
 
     @staticmethod
     def _esc(text: str) -> str:
-        """Escape Markdown special chars to prevent parse errors."""
-        for ch in ("_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
-            text = text.replace(ch, f"\\{ch}")
-        return text
+        return _esc_i18n(text)
 
     def _get_dryrun_portfolio(self) -> DryrunPortfolio | None:
         return self.db.scalar(select(DryrunPortfolio).where(DryrunPortfolio.name == "default").limit(1))
@@ -351,42 +349,47 @@ class TelegramProductService:
         total_invested = sum(p.notional_usd for p, _ in open_positions)
         total_max_win = sum(p.shares_count * (1.0 - p.entry_price) for p, _ in open_positions)
         total_pnl = sum(p.unrealized_pnl_usd for p, _ in open_positions)
-        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_sign = "\\+" if total_pnl >= 0 else ""
 
         header = (
-            f"📂 *Open Positions* — {len(open_positions)}\n"
-            f"Вклад: `${total_invested:.2f}` \\| Макс виграш: `+${total_max_win:.2f}` \\| P&L: `{pnl_sign}${total_pnl:.2f}`"
+            f"📂 *Відкриті позиції* — {len(open_positions)}\n"
+            f"Вклад: `${self._esc(f'{total_invested:.2f}')}` \\| "
+            f"Макс: `\\+${self._esc(f'{total_max_win:.2f}')}` \\| "
+            f"P&L: `{pnl_sign}{self._esc(f'{total_pnl:.2f}')}`"
         )
 
-        # Table in code block (no escaping needed inside ```)
-        rows = ["#   Dir  Koef  Вклад  Макс   EV/д   P&L    Дата"]
-        rows.append("─" * 52)
+        # Mobile-friendly cards — one per position
+        cards: list[str] = []
+        now = datetime.now(UTC)
         for i, (pos, market) in enumerate(open_positions, 1):
             mark = pos.mark_price or pos.entry_price
             koef = 1.0 / pos.entry_price if pos.entry_price > 0 else 0.0
             max_win = pos.shares_count * (1.0 - pos.entry_price)
             ev = pos.entry_ev_pct or 0.0
             pnl_pct = (mark - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0.0
-            dl = pos.resolution_deadline.strftime("%b %d") if pos.resolution_deadline else "  —  "
-            # daily_ev from open_reason if available
-            days_left = ((pos.resolution_deadline - datetime.now(UTC)).total_seconds() / 86400.0
-                         if pos.resolution_deadline else 999.0)
+            pnl_sign_c = "\\+" if pnl_pct >= 0 else ""
+            days_left = (
+                (pos.resolution_deadline - now).total_seconds() / 86400.0
+                if pos.resolution_deadline else 999.0
+            )
             daily_ev = ev / max(1.0, days_left)
-            dev_str = f"{daily_ev*100:.2f}%"
-            pnl_str = f"{'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%"
-            rows.append(
-                f"{i:<3} {pos.direction:<3}  {koef:.1f}x  ${pos.notional_usd:<5.2f} +${max_win:<5.2f} {dev_str:<6} {pnl_str:<6} {dl}"
+            dl = self._esc(pos.resolution_deadline.strftime("%d.%m.%y")) if pos.resolution_deadline else "—"
+            title_raw = (market.title[:60] if market else "Unknown").replace("Arbitrage candidate: ", "")
+            title = self._esc(title_raw)
+            direction = self._esc(str(pos.direction or "—"))
+            koef_s = self._esc(f"{koef:.1f}")
+            bet_s = self._esc(f"{pos.notional_usd:.2f}")
+            max_win_s = self._esc(f"{max_win:.2f}")
+            dev_s = self._esc(f"{daily_ev*100:.2f}")
+            pnl_s = self._esc(f"{pnl_pct:.1f}")
+            cards.append(
+                f"*{i}\\. {title}*\n"
+                f"{direction} · `x{koef_s}` · до {dl}\n"
+                f"Ставка: `\\${bet_s}` · Макс: `\\+${max_win_s}`\n"
+                f"EV/д: `{dev_s}%` · P&L: `{pnl_sign_c}{pnl_s}%`"
             )
 
-        # Titles block — short list after table
-        titles_lines = [""]
-        for i, (pos, market) in enumerate(open_positions, 1):
-            title = (market.title[:50] if market else "Unknown").replace("Arbitrage candidate: ", "")
-            dl = pos.resolution_deadline.strftime("%b %d") if pos.resolution_deadline else "no date"
-            titles_lines.append(f"{i}\\. _{self._esc(title[:48])}_")
-
-        table_block = "```\n" + "\n".join(rows) + "\n```"
-        return header + "\n\n" + table_block + "\n" + "\n".join(titles_lines)
+        return header + "\n\n" + "\n\n".join(cards)
 
     def get_simulate_text(self) -> str:
         """Full candidate scan report without opening positions."""
