@@ -132,7 +132,7 @@ def render_stage17_daily(summary: dict) -> str:
 
     return (
         f"📊 *Stage17 — щоденний звіт*\n\n"
-        f"Hit rate: `{hr_s}` \\| ROI: `{roi_s}`\n"
+        f"Влучність: `{hr_s}` \\| ROI: `{roi_s}`\n"
         f"Відкритих позицій: `{open_s}` \\| Сер\\. коеф: `{koef_s}`\n"
         f"Рішення: `{final_s}`"
     )

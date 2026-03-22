@@ -317,7 +317,7 @@ class TelegramProductService:
         ]
         if n_closed > 0:
             lines += [
-                f"🎯 Win rate:   `{self._esc(f'{win_rate*100:.0f}')}%`  \\({len(wins)}/{n_closed} закрито\\)",
+                f"🎯 Влучність:  `{self._esc(f'{win_rate*100:.0f}')}%`  \\({len(wins)}/{n_closed} закрито\\)",
                 f"⚡ Kelly E:    `{self._esc(f'{kelly_e:.4f}')}`",
                 f"🎲 Prob профіту: `{self._esc(f'{profit_prob:.1f}')}%`",
             ]
@@ -491,7 +491,7 @@ class TelegramProductService:
         if n_closed > 0:
             lines += [
                 f"Закрито: `{n_closed}`  ·  Виграно: `{len(wins)}`  ·  Програно: `{len(losses)}`",
-                f"Win rate: `{win_rate*100:.1f}%`",
+                f"Влучність: `{self._esc(f'{win_rate*100:.1f}')}%`",
                 f"Сер\\. виграш:  `\\+${self._esc(f'{avg_win:.2f}')}`",
                 f"Сер\\. програш: `\\-${self._esc(f'{avg_loss:.2f}')}`",
                 "",
