@@ -83,10 +83,20 @@ def render_stage17_win(item: dict) -> str:
 # ─── Stage17: daily digest ───────────────────────────────────────────────────
 
 _FINAL_DECISION_UA: dict[str, str] = {
+    # Stage17 tail decisions
     "CONTINUE": "Продовжувати",
     "PAUSE": "Пауза",
     "STOP": "Зупинити",
     "REVIEW": "На перегляд",
+    # Stage8 execution actions (may appear as final_decision in batch reports)
+    "EXECUTE_ALLOWED": "Дозволено",
+    "SHADOW_ONLY": "Тільки тінь",
+    "NO_GO": "Заблоковано",
+    "NO_GO_DATA_PENDING": "Заблоковано (дані)",
+    "LIMITED_GO": "Обмежено",
+    "HOLD": "Утримання",
+    "SKIP": "Пропуск",
+    "KEEP": "Зберегти",
 }
 
 

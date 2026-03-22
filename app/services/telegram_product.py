@@ -304,22 +304,22 @@ class TelegramProductService:
         profit_prob = win_rate * 100.0
 
         lines = [
-            "💼 *Dry\\-Run Portfolio*",
+            "💼 *Dry\\-Run Портфель*",
             "━━━━━━━━━━━━━━━━",
-            f"💵 Cash:       `${portfolio.current_cash_usd:.2f}`",
-            f"📦 In trades:  `${sum(p.notional_usd for p in open_positions):.2f}`  \\({len(open_positions)} open\\)",
-            f"🏦 Total:      `${total_value:.2f}`",
+            f"💵 Готівка:    `\\${self._esc(f'{portfolio.current_cash_usd:.2f}')}`",
+            f"📦 В угодах:   `\\${self._esc('{:.2f}'.format(sum(p.notional_usd for p in open_positions)))}`  \\({len(open_positions)} відкр\\.\\)",
+            f"🏦 Разом:      `\\${self._esc(f'{total_value:.2f}')}`",
             "",
-            f"📈 Realized:   `{real_sign}${portfolio.total_realized_pnl_usd:.2f}`",
-            f"📉 Unrealized: `{unreal_sign}${portfolio.total_unrealized_pnl_usd:.2f}`",
-            f"📊 ROI:        `{roi_sign}{roi:.2f}%`",
+            f"📈 Реалізовано:   `{real_sign}\\${self._esc(f'{portfolio.total_realized_pnl_usd:.2f}')}`",
+            f"📉 Нереалізовано: `{unreal_sign}\\${self._esc(f'{portfolio.total_unrealized_pnl_usd:.2f}')}`",
+            f"📊 ROI:           `{roi_sign}{self._esc(f'{roi:.2f}')}%`",
             "",
         ]
         if n_closed > 0:
             lines += [
-                f"🎯 Win rate:   `{win_rate*100:.0f}%`  \\({len(wins)}/{n_closed} closed\\)",
-                f"⚡ Kelly E:    `{kelly_e:.4f}`",
-                f"🎲 Profit prob: `{profit_prob:.1f}%`",
+                f"🎯 Win rate:   `{self._esc(f'{win_rate*100:.0f}')}%`  \\({len(wins)}/{n_closed} закрито\\)",
+                f"⚡ Kelly E:    `{self._esc(f'{kelly_e:.4f}')}`",
+                f"🎲 Prob профіту: `{self._esc(f'{profit_prob:.1f}')}%`",
             ]
         else:
             lines.append("_Закритих позицій ще немає_")
@@ -374,7 +374,7 @@ class TelegramProductService:
             )
             daily_ev = ev / max(1.0, days_left)
             dl = self._esc(pos.resolution_deadline.strftime("%d.%m.%y")) if pos.resolution_deadline else "—"
-            title_raw = (market.title[:60] if market else "Unknown").replace("Arbitrage candidate: ", "")
+            title_raw = (market.title[:60] if market else "Невідомо").replace("Arbitrage candidate: ", "")
             title = self._esc(title_raw)
             direction = self._esc(str(pos.direction or "—"))
             koef_s = self._esc(f"{koef:.1f}")
@@ -407,15 +407,15 @@ class TelegramProductService:
         llm_rejected = [b for b in borderline if b["signal_id"] not in llm_approved]
 
         lines = [
-            "🔬 *Simulate — candidate scan*",
-            f"✅ Accepted: `{len(accepted)}` \\| 🤖 LLM rescued: `{len(llm_from_borderline)}` \\| ⏭ Dupes: `{duplicates}`",
-            f"🚫 Hard\\-rejected: `{len(hard_rejected)}` \\| 🟡 Soft\\-rejected: `{len(soft_rejected)}` \\| 🤖 LLM\\-rejected: `{len(llm_rejected)}`",
+            "🔬 *Симуляція — сканування кандидатів*",
+            f"✅ Прийнято: `{len(accepted)}` \\| 🤖 LLM врятував: `{len(llm_from_borderline)}` \\| ⏭ Дублі: `{duplicates}`",
+            f"🚫 Hard\\-відхилено: `{len(hard_rejected)}` \\| 🟡 Soft\\-відхилено: `{len(soft_rejected)}` \\| 🤖 LLM\\-відхилено: `{len(llm_rejected)}`",
             "",
         ]
 
         if accepted:
-            lines.append("*✅ Would open \\(top 5 by EV/day\\):*")
-            rows = ["#  Dir  Koef  EV/d    Days  Vol     Title"]
+            lines.append("*✅ Відкрити \\(топ 5 за EV/д\\):*")
+            rows = ["#  Dir  Koef  EV/д    Днів  Об'єм   Назва"]
             rows.append("─" * 52)
             for i, c in enumerate(accepted[:5], 1):
                 dl = f"{c['days_to_res']:.0f}d" if c["days_to_res"] < 999 else "  —"
