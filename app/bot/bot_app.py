@@ -14,7 +14,7 @@ from app.db.session import SessionLocal
 from app.models.enums import AccessLevel, SignalType, SubscriptionStatus
 from app.models.models import Market, Signal, User
 from app.services.dryrun.simulator import check_resolutions, refresh_mark_prices, run_simulation_cycle
-from app.services.telegram_i18n import esc as _mv2
+from app.services.telegram_i18n import esc as _mv2, esc_url as _mv2_url, signal_type_ua as _sig_ua
 from app.services.telegram_product import TelegramProductService
 from app.services.telegram_templates import render_start, render_help, render_plans, render_me
 
@@ -79,7 +79,7 @@ def _upsert_user(message: Message) -> User:
 
 async def _err(message: Message, exc: Exception) -> None:
     logger.exception("Bot handler error: %s", exc)
-    await message.answer("⚠️ Something went wrong. Please try again.")
+    await message.answer("⚠️ Щось пішло не так\\. Спробуйте ще раз\\.", parse_mode="MarkdownV2")
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ async def cmd_signals(message: Message) -> None:
             user = svc.get_or_create_user(str(message.from_user.id), message.from_user.username)
             rows = svc.latest_signals(user=user, signal_type=None, page=1, page_size=7)
             if not rows:
-                await message.answer("No signals yet")
+                await message.answer("Сигналів поки немає")
                 return
             allowed: list[Signal] = []
             for row in rows:
@@ -131,7 +131,7 @@ async def cmd_signals(message: Message) -> None:
                 else:
                     break
             if not allowed:
-                await message.answer("📛 Daily signal limit reached. Use /plans")
+                await message.answer("📛 Ліміт сигналів вичерпано\\. Дивіться /plans", parse_mode="MarkdownV2")
                 return
             # Prefetch markets in one query
             market_ids = [s.market_id for s in allowed]
@@ -142,11 +142,12 @@ async def cmd_signals(message: Message) -> None:
             parts = []
             for s in allowed:
                 market = markets.get(s.market_id)
-                sig_type = _mv2(s.signal_type.value)
+                sig_type = _mv2(_sig_ua(s.signal_type.value))
                 title = _mv2(s.title[:80])
-                conf = _mv2(f"{s.confidence_score or 0:.2f}")
-                link = f"[Open Market]({market.url})" if market and market.url else ""
-                parts.append(f"*{sig_type}* \\| c={conf}\n{title}\n{link}")
+                conf = _mv2(f"{s.confidence_score or 0:.0%}")
+                url = market.url if market and market.url else None
+                link = f"[🔗 Ринок]({_mv2_url(url)})" if url else ""
+                parts.append(f"*{sig_type}* \\| {conf}\n{title}\n{link}")
             await message.answer("\n\n".join(parts), parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as exc:
         await _err(message, exc)
@@ -160,7 +161,7 @@ async def cmd_top(message: Message) -> None:
             user = svc.get_or_create_user(str(message.from_user.id), message.from_user.username)
             rows = svc.top_ranked_signals(user, limit=5)
             if not rows:
-                await message.answer("No top signals yet")
+                await message.answer("Топ\\-сигналів поки немає", parse_mode="MarkdownV2")
                 return
             allowed: list[Signal] = []
             for row in rows:
@@ -170,7 +171,7 @@ async def cmd_top(message: Message) -> None:
                 else:
                     break
             if not allowed:
-                await message.answer("📛 Daily signal limit reached. Use /plans")
+                await message.answer("📛 Ліміт сигналів вичерпано\\. Дивіться /plans", parse_mode="MarkdownV2")
                 return
             market_ids = [s.market_id for s in allowed]
             markets = {
@@ -178,15 +179,16 @@ async def cmd_top(message: Message) -> None:
                 for m in db.scalars(select(Market).where(Market.id.in_(market_ids)))
             }
             nums = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-            parts = ["🔥 *Top Prediction Market Signals*"]
+            parts = ["🔥 *Топ сигналів ринків прогнозів*"]
             for i, s in enumerate(allowed):
                 market = markets.get(s.market_id)
                 num = nums[i] if i < len(nums) else f"{i+1}\\."
-                sig_type = _mv2(s.signal_type.value)
-                score = _mv2(f"{s.confidence_score or 0:.2f}")
+                sig_type = _mv2(_sig_ua(s.signal_type.value))
+                score = _mv2(f"{s.confidence_score or 0:.0%}")
                 title = _mv2(s.title[:88])
-                link = f"[Open Market]({market.url})" if market and market.url else ""
-                parts.append(f"{num} *{sig_type}* \\| score={score}\n{title}\n{link}")
+                url = market.url if market and market.url else None
+                link = f"[🔗 Ринок]({_mv2_url(url)})" if url else ""
+                parts.append(f"{num} *{sig_type}* \\| {score}\n{title}\n{link}")
             await message.answer("\n\n".join(parts), parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as exc:
         await _err(message, exc)
@@ -200,20 +202,22 @@ async def cmd_watchlist(message: Message) -> None:
             user = svc.get_or_create_user(str(message.from_user.id), message.from_user.username)
             items = svc.list_watchlist(user)
             if not items:
-                await message.answer("Your watchlist is empty. Use /add <market\\_id>", parse_mode="MarkdownV2")
+                await message.answer("Вотчліст порожній\\. Додайте: /add \\<market\\_id\\>", parse_mode="MarkdownV2")
                 return
             total = len(items)
-            parts = [f"📌 *Your Watchlist* \\({total}\\)"]
+            parts = [f"📌 *Ваш вотчліст* \\({total}\\)"]
             for item in items[:10]:
                 title = _mv2(item["title"][:72])
-                last_sig = _mv2(item["last_signal_type"] or "none")
+                raw_sig = item["last_signal_type"] or ""
+                from app.services.telegram_i18n import signal_type_ua as _sig_ua_local
+                last_sig = _mv2(_sig_ua_local(raw_sig) if raw_sig else "немає")
                 prob = item.get("probability_yes")
                 prob_str = f" · {prob*100:.0f}%" if prob is not None else ""
                 url = item.get("url") or ""
-                link = f"[#{item['market_id']}]({url})" if url else f"\\#{item['market_id']}"
-                parts.append(f"{link} {title}{_mv2(prob_str)}\n_Last: {last_sig}_")
+                link = f"[\\#{item['market_id']}]({_mv2_url(url)})" if url else f"\\#{item['market_id']}"
+                parts.append(f"{link} {title}{_mv2(prob_str)}\n_Сигнал: {last_sig}_")
             if total > 10:
-                parts.append(f"_\\.\\.\\. \\+{total - 10} more_")
+                parts.append(f"_\\.\\.\\. \\+{total - 10} ще_")
             await message.answer("\n\n".join(parts), parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as exc:
         await _err(message, exc)
@@ -224,21 +228,20 @@ async def cmd_add(message: Message) -> None:
     try:
         parts = (message.text or "").split()
         if len(parts) < 2 or not parts[1].isdigit():
-            await message.answer("Use: /add <market_id>")
+            await message.answer("Використання: /add \\<market\\_id\\>", parse_mode="MarkdownV2")
             return
         with _db() as db:
             svc = TelegramProductService(db)
             user = svc.get_or_create_user(str(message.from_user.id), message.from_user.username)
             ok, msg = svc.add_watchlist(user, int(parts[1]))
             if ok:
-                await message.answer("✅ Added to watchlist")
+                await message.answer("✅ Додано до вотчлісту")
             else:
-                # Don't leak internal messages — map to user-friendly text
                 friendly = {
-                    "Market not found": "❌ Market not found. Check the market ID.",
-                    "Already in watchlist": "ℹ️ Already in your watchlist.",
-                }.get(msg, "❌ Could not add. Check your plan limit (/plans).")
-                await message.answer(friendly)
+                    "Market not found": "❌ Ринок не знайдено\\. Перевірте ID\\.",
+                    "Already in watchlist": "ℹ️ Вже у вотчлісті\\.",
+                }.get(msg, "❌ Не вдалось додати\\. Перевірте ліміт плану \\(/plans\\)\\.")
+                await message.answer(friendly, parse_mode="MarkdownV2")
     except Exception as exc:
         await _err(message, exc)
 
@@ -248,13 +251,13 @@ async def cmd_remove(message: Message) -> None:
     try:
         parts = (message.text or "").split()
         if len(parts) < 2 or not parts[1].isdigit():
-            await message.answer("Use: /remove <market_id>")
+            await message.answer("Використання: /remove \\<market\\_id\\>", parse_mode="MarkdownV2")
             return
         with _db() as db:
             svc = TelegramProductService(db)
             user = svc.get_or_create_user(str(message.from_user.id), message.from_user.username)
             ok = svc.remove_watchlist(user, int(parts[1]))
-            await message.answer("🗑 Removed" if ok else "ℹ️ Not in your watchlist")
+            await message.answer("🗑 Видалено" if ok else "ℹ️ Не у вотчлісті")
     except Exception as exc:
         await _err(message, exc)
 
@@ -296,7 +299,7 @@ async def cmd_me(message: Message) -> None:
 @dp.message(Command("portfolio"))
 async def cmd_portfolio(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
         with _db() as db:
@@ -310,7 +313,7 @@ async def cmd_portfolio(message: Message) -> None:
 @dp.message(Command("positions"))
 async def cmd_positions(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
         with _db() as db:
@@ -324,7 +327,7 @@ async def cmd_positions(message: Message) -> None:
 @dp.message(Command("pnl"))
 async def cmd_pnl(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
         with _db() as db:
@@ -342,10 +345,10 @@ async def cmd_pnl(message: Message) -> None:
 @dp.message(Command("dryrun"))
 async def cmd_dryrun(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
-        await message.answer("⏳ Running simulation cycle\\.\\.\\.", parse_mode="MarkdownV2")
+        await message.answer("⏳ Запускаємо симуляцію\\.\\.\\.", parse_mode="MarkdownV2")
         with _db() as db:
             result = run_simulation_cycle(db)
             db.commit()
@@ -357,8 +360,8 @@ async def cmd_dryrun(message: Message) -> None:
         skipped = result.get("skipped", 0)
         cash = result.get("cash_remaining_usd", 0)
         summary = (
-            f"✅ *Simulation done*\n"
-            f"Opened: `{opened}` · Skipped: `{skipped}` · Cash: `${_mv2(f'{cash:.2f}')}`\n\n"
+            f"✅ *Симуляцію завершено*\n"
+            f"Відкрито: `{opened}` · Пропущено: `{skipped}` · Залишок: `\\${_mv2(f'{cash:.2f}')}`\n\n"
             + portfolio_text
         )
         await message.answer(summary, parse_mode="MarkdownV2")
@@ -369,10 +372,10 @@ async def cmd_dryrun(message: Message) -> None:
 @dp.message(Command("simulate"))
 async def cmd_simulate(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
-        await message.answer("🔬 Scanning candidates\\.\\.\\.", parse_mode="MarkdownV2")
+        await message.answer("🔬 Сканування кандидатів\\.\\.\\.", parse_mode="MarkdownV2")
         with _db() as db:
             svc = TelegramProductService(db)
             text = svc.get_simulate_text()
@@ -384,7 +387,7 @@ async def cmd_simulate(message: Message) -> None:
 @dp.message(Command("refresh"))
 async def cmd_refresh(message: Message) -> None:
     if not _is_admin(message):
-        await message.answer("⛔ Admin only")
+        await message.answer("⛔ Тільки для адміністраторів")
         return
     try:
         with _db() as db:
@@ -399,9 +402,9 @@ async def cmd_refresh(message: Message) -> None:
         sl_closed = mark_result.get("stop_loss_closed", 0)
         unreal = mark_result.get("total_unrealized_usd", 0)
         summary = (
-            f"🔄 *Prices refreshed*\n"
-            f"Updated: `{updated}` · Resolved: `{resolved}` · Stop\\-loss: `{sl_closed}`\n"
-            f"Unrealized: `{_mv2(f'${unreal:+.2f}')}`\n\n"
+            f"🔄 *Ціни оновлено*\n"
+            f"Оновлено: `{updated}` · Резолюцій: `{resolved}` · Стоп\\-лос: `{sl_closed}`\n"
+            f"Нереалізований P&L: `{_mv2(f'${unreal:+.2f}')}`\n\n"
             + portfolio_text
         )
         await message.answer(summary, parse_mode="MarkdownV2")
@@ -414,22 +417,22 @@ async def cmd_refresh(message: Message) -> None:
 # ---------------------------------------------------------------------------
 
 _USER_COMMANDS = [
-    BotCommand(command="start", description="Welcome & command list"),
-    BotCommand(command="top", description="Top 5 signals right now"),
-    BotCommand(command="signals", description="Latest signals"),
-    BotCommand(command="watchlist", description="Your watchlist"),
-    BotCommand(command="digest", description="Today's summary"),
-    BotCommand(command="me", description="Your profile & plan"),
-    BotCommand(command="plans", description="Available plans"),
+    BotCommand(command="start", description="Вітання та список команд"),
+    BotCommand(command="top", description="Топ-5 сигналів прямо зараз"),
+    BotCommand(command="signals", description="Останні сигнали"),
+    BotCommand(command="watchlist", description="Ваш вотчліст"),
+    BotCommand(command="digest", description="Щоденний огляд"),
+    BotCommand(command="me", description="Ваш профіль та план"),
+    BotCommand(command="plans", description="Доступні плани"),
 ]
 
 _ADMIN_COMMANDS = _USER_COMMANDS + [
-    BotCommand(command="portfolio", description="Dry-run portfolio overview"),
-    BotCommand(command="positions", description="Open positions"),
-    BotCommand(command="pnl", description="P&L report"),
-    BotCommand(command="dryrun", description="Run simulation cycle now"),
-    BotCommand(command="simulate", description="Scan candidates (no positions opened)"),
-    BotCommand(command="refresh", description="Refresh mark prices & resolutions"),
+    BotCommand(command="portfolio", description="Dry-run: баланс портфелю"),
+    BotCommand(command="positions", description="Відкриті позиції"),
+    BotCommand(command="pnl", description="Звіт P&L"),
+    BotCommand(command="dryrun", description="Запустити симуляцію"),
+    BotCommand(command="simulate", description="Сканування кандидатів (без відкриття)"),
+    BotCommand(command="refresh", description="Оновити ціни та резолюції"),
 ]
 
 

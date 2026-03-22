@@ -266,7 +266,7 @@ class TelegramProductService:
     def get_dryrun_portfolio_text(self) -> str:
         portfolio = self._get_dryrun_portfolio()
         if portfolio is None:
-            return "💼 *Dry\\-Run Portfolio*\n\nNo portfolio yet\\. Use `/dryrun run` to start\\."
+            return "💼 *Dry\\-Run Portfolio*\n\nПортфель ще не створено\\. Запустіть `/dryrun`\\."
 
         open_positions = list(
             self.db.scalars(
@@ -322,14 +322,14 @@ class TelegramProductService:
                 f"🎲 Profit prob: `{profit_prob:.1f}%`",
             ]
         else:
-            lines.append("_No closed positions yet_")
+            lines.append("_Закритих позицій ще немає_")
 
         return "\n".join(lines)
 
     def get_dryrun_positions_text(self) -> str:
         portfolio = self._get_dryrun_portfolio()
         if portfolio is None:
-            return "📂 No portfolio found\\."
+            return "📂 Портфель не знайдено\\."
 
         open_positions = list(
             self.db.execute(
@@ -344,7 +344,7 @@ class TelegramProductService:
         )
 
         if not open_positions:
-            return "📂 *Open Positions*\n\n_No open positions\\. Run `/dryrun run` to open some\\._"
+            return "📂 *Відкриті позиції*\n\n_Позицій поки немає\\. Запустіть `/dryrun` для симуляції\\._"
 
         total_invested = sum(p.notional_usd for p, _ in open_positions)
         total_max_win = sum(p.shares_count * (1.0 - p.entry_price) for p, _ in open_positions)
@@ -451,7 +451,7 @@ class TelegramProductService:
     def get_dryrun_pnl_text(self) -> str:
         portfolio = self._get_dryrun_portfolio()
         if portfolio is None:
-            return "📊 *P&L Report*\n\n_No data yet\\._"
+            return "📊 *P&L Звіт*\n\n_Даних поки немає\\._"
 
         closed = list(
             self.db.scalars(
@@ -485,30 +485,30 @@ class TelegramProductService:
         roi_sign = "+" if roi >= 0 else ""
 
         lines = [
-            "📊 *P&L Report*",
+            "📊 *P&L Звіт*",
             "━━━━━━━━━━━━━",
         ]
         if n_closed > 0:
             lines += [
-                f"Closed: `{n_closed}`  ·  Won: `{len(wins)}`  ·  Lost: `{len(losses)}`",
+                f"Закрито: `{n_closed}`  ·  Виграно: `{len(wins)}`  ·  Програно: `{len(losses)}`",
                 f"Win rate: `{win_rate*100:.1f}%`",
-                f"Avg win:  `+${avg_win:.2f}`",
-                f"Avg loss: `\\-${avg_loss:.2f}`",
+                f"Сер\\. виграш:  `\\+${self._esc(f'{avg_win:.2f}')}`",
+                f"Сер\\. програш: `\\-${self._esc(f'{avg_loss:.2f}')}`",
                 "",
-                f"Kelly E\\(V\\):   `{kelly_e:.4f}`",
-                f"Profit prob:  `{profit_prob:.1f}%`",
+                f"Kelly E\\(V\\):   `{self._esc(f'{kelly_e:.4f}')}`",
+                f"Prob профіту:  `{self._esc(f'{profit_prob:.1f}')}%`",
                 "",
             ]
         else:
-            lines += ["_No closed positions yet_", ""]
+            lines += ["_Закритих позицій ще немає_", ""]
 
         lines += [
-            f"ROI:          `{roi_sign}{roi:.2f}%`",
-            f"Initial:      `${portfolio.initial_balance_usd:.2f}`",
-            f"Current val:  `${total_value:.2f}`",
-            f"Open pos:     `{len(open_pos)}`",
+            f"ROI:          `{roi_sign}{self._esc(f'{roi:.2f}')}%`",
+            f"Стартовий:    `\\${self._esc(f'{portfolio.initial_balance_usd:.2f}')}`",
+            f"Поточний:     `\\${self._esc(f'{total_value:.2f}')}`",
+            f"Відкритих:    `{len(open_pos)}`",
             "",
-            "_Shadow mode · Not financial advice_",
+            "_Тіньовий режим · Не є фінансовою порадою_",
         ]
         return "\n".join(lines)
 

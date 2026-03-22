@@ -23,19 +23,14 @@ def render_signal_push(
     metric_value: float,
     utility: float,
     slippage_edge: float,
-    cost_impact: float,
-    assumptions: str,
     disclaimer: str,
     market_url: str | None = None,
 ) -> str:
     type_ua = esc(signal_type_ua(signal_type))
     t = esc(title[:120])
-    conf_s = esc(f"{confidence:.2f}")
+    conf_s = esc(f"{confidence:.0%}")
     metric_s = esc(f"{metric_value:.1f}%")
-    util_s = esc(f"{utility:.3f}")
-    edge_s = esc(f"{slippage_edge:.3f}")
-    cost_s = esc(f"{cost_impact:.3f}")
-    assump_s = esc(assumptions)
+    edge_s = esc(f"{slippage_edge*100:.1f}%")
     disc_s = esc(disclaimer)
     metric_label_s = esc(metric_label)
 
@@ -45,8 +40,7 @@ def render_signal_push(
         f"🔥 *{type_ua}*\n"
         f"{t}{link}\n\n"
         f"Впевненість: `{conf_s}` \\| {metric_label_s}: `{metric_s}`\n"
-        f"Корисність: `{util_s}` \\| Перевага: `{edge_s}` \\(витрати: `{cost_s}`\\)\n"
-        f"Модель: `{assump_s}`\n"
+        f"Перевага після витрат: `{edge_s}`\n"
         f"_{disc_s}_"
     )
 
@@ -60,7 +54,7 @@ def render_stage17_open(item: dict) -> str:
     our_pct = 100.0 * float(item.get("our_prob") or 0.0)
     mkt_pct = 100.0 * float(item.get("market_prob") or 0.0)
     bet = float(item.get("notional_usd") or 0.0)
-    platform = esc(str(item.get("platform") or "Unknown"))
+    platform = esc(str(item.get("platform") or "Невідомо"))
     days = int(item.get("days_to_resolution") or 0)
     title = esc(str(item.get("title") or "")[:120])
 
@@ -88,25 +82,43 @@ def render_stage17_win(item: dict) -> str:
 
 # ─── Stage17: daily digest ───────────────────────────────────────────────────
 
+_FINAL_DECISION_UA: dict[str, str] = {
+    "CONTINUE": "Продовжувати",
+    "PAUSE": "Пауза",
+    "STOP": "Зупинити",
+    "REVIEW": "На перегляд",
+}
+
+
 def render_stage17_daily(summary: dict) -> str:
     hit_rate = summary.get("hit_rate_tail")
     roi = summary.get("roi_total")
     open_pos = summary.get("open_positions")
     avg_koef = summary.get("avg_koef")
-    final = summary.get("final_decision")
+    final = str(summary.get("final_decision") or "")
 
-    def _fmt(v) -> str:
+    def _pct(v) -> str:
         if v is None:
             return "n/a"
-        if isinstance(v, float):
-            return f"{v:.3f}"
-        return str(v)
+        try:
+            return f"{float(v)*100:.1f}%"
+        except (TypeError, ValueError):
+            return str(v)
 
-    hr_s = esc(_fmt(hit_rate))
-    roi_s = esc(_fmt(roi))
+    def _f2(v) -> str:
+        if v is None:
+            return "n/a"
+        try:
+            return f"{float(v):.2f}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    hr_s = esc(_pct(hit_rate))
+    roi_s = esc(_pct(roi))
     open_s = esc(str(open_pos) if open_pos is not None else "n/a")
-    koef_s = esc(_fmt(avg_koef))
-    final_s = esc(str(final) if final else "n/a")
+    koef_s = esc(_f2(avg_koef))
+    final_ua = _FINAL_DECISION_UA.get(final.upper(), final) if final else "n/a"
+    final_s = esc(final_ua)
 
     return (
         f"📊 *Stage17 — щоденний звіт*\n\n"

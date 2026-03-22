@@ -23,6 +23,7 @@ from app.models.models import (
     Stage11Order,
     Stage17TailPosition,
     User,
+    UserEvent,
 )
 from app.services.collectors.sync_service import CollectorSyncService
 from app.services.research.stage7_shadow import build_stage7_shadow_report
@@ -65,12 +66,30 @@ def _as_obj_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _admin_chat_ids(settings) -> list[str]:
+    """Collect all configured admin chat IDs (telegram_chat_id + telegram_admin_ids)."""
+    ids: list[str] = []
+    primary = str(settings.telegram_chat_id or "").strip()
+    if primary:
+        ids.append(primary)
+    for raw in (getattr(settings, "telegram_admin_ids", "") or "").split(","):
+        uid = raw.strip()
+        if uid and uid not in ids:
+            ids.append(uid)
+    return ids
+
+
 def _send_stage17_telegram_messages(settings, messages: list[str]) -> int:
     token = str(settings.telegram_bot_token or "").strip()
-    chat_id = str(settings.telegram_chat_id or "").strip()
-    if not token or not chat_id:
+    if not token:
         return 0
-    return send_to_chat(token, chat_id, messages, parse_mode="MarkdownV2")
+    recipients = _admin_chat_ids(settings)
+    if not recipients:
+        return 0
+    sent = 0
+    for chat_id in recipients:
+        sent += send_to_chat(token, chat_id, messages, parse_mode="MarkdownV2")
+    return sent
 
 
 def _build_stage17_open_message(item: dict) -> str:
@@ -279,16 +298,25 @@ def send_test_signal_job(db: Session) -> dict:
 
 def daily_digest_job(db: Session) -> dict:
     def _run() -> dict:
+        settings = get_settings()
+        token = str(settings.telegram_bot_token or "").strip()
         svc = TelegramProductService(db)
-        users = list(db.scalars(select(User)))
-        for user in users:
+        all_users = list(db.scalars(select(User)))
+        for user in all_users:
             user.signals_sent_today = 0
         db.commit()
         sent = 0
-        for user in users:
-            svc.daily_digest(user)
+        skipped = 0
+        for user in all_users:
+            if user.subscription_status == SubscriptionStatus.INACTIVE:
+                skipped += 1
+                continue
+            text = svc.daily_digest(user)
+            if token and user.telegram_user_id:
+                from app.services.telegram_delivery import send_message as _tg_send_digest
+                _tg_send_digest(token, str(user.telegram_user_id), text, parse_mode="MarkdownV2")
             sent += 1
-        return {"digests_sent": sent}
+        return {"digests_sent": sent, "skipped_inactive": skipped}
 
     return _run_job(db, job_name="daily_digest", run_fn=_run)
 
@@ -300,16 +328,32 @@ def signal_push_job(db: Session) -> dict:
             return {"signals_prepared": 0, "signals_sent": 0, "note": "bot token missing"}
 
         svc = TelegramProductService(db)
-        # Skip INACTIVE users — they opted out or never subscribed
+        # Only push to active subscribers (INACTIVE and CANCELED opted out)
         users = [
             u for u in db.scalars(select(User))
-            if u.subscription_status != SubscriptionStatus.INACTIVE
+            if u.subscription_status == SubscriptionStatus.ACTIVE
         ]
         sent = 0
         prepared = 0
         skipped_by_reason: dict[str, int] = {}
         now = datetime.now(UTC)
+        dedup_window = now - timedelta(hours=6)
         token = str(settings.telegram_bot_token or "")
+
+        # Pre-load recently-sent market_ids per user for deduplication (6h window)
+        recently_sent: dict[int, set[int]] = {}
+        recent_events = list(
+            db.execute(
+                select(UserEvent.user_id, UserEvent.market_id)
+                .where(
+                    UserEvent.event_type == "signal_sent",
+                    UserEvent.created_at >= dedup_window,
+                    UserEvent.market_id.is_not(None),
+                )
+            )
+        )
+        for ev_user_id, ev_market_id in recent_events:
+            recently_sent.setdefault(ev_user_id, set()).add(ev_market_id)
 
         def _skip(reason: str) -> None:
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
@@ -324,12 +368,17 @@ def signal_push_job(db: Session) -> dict:
                 log_variant_event=False,
             )
             top = [s for s in top if rank_score(s) > 0.1][:5]
+            user_sent_markets = recently_sent.get(user.id, set())
             for signal in top:
                 if not svc.can_send_signal(user, 1):
                     break
                 market = markets_by_id.get(int(signal.market_id or 0))
                 if not market:
                     _skip("market_missing")
+                    continue
+                # Deduplication: skip if this market was already pushed to user in 6h
+                if market.id in user_sent_markets:
+                    _skip("dedup_recent_send")
                     continue
                 if _market_is_resolved(market, now=now):
                     _skip("market_resolved_or_closed")
@@ -348,8 +397,6 @@ def signal_push_job(db: Session) -> dict:
                 if utility <= min_utility:
                     _skip("utility_too_low")
                     continue
-                cost_impact = max(0.0, expected_edge - slippage_edge)
-                assumptions = str(ex.get("assumptions_version") or "n/a")
                 if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
                     metric_label = "Рух ціни"
                     metric_value = float((signal.divergence_score if signal.divergence_score is not None else 0.0) * 100.0)
@@ -369,8 +416,6 @@ def signal_push_job(db: Session) -> dict:
                     metric_value=metric_value,
                     utility=utility,
                     slippage_edge=slippage_edge,
-                    cost_impact=cost_impact,
-                    assumptions=assumptions,
                     disclaimer=str(settings.research_ethics_disclaimer_text),
                     market_url=market.url if market else None,
                 )
