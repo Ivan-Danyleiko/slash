@@ -178,6 +178,7 @@ class ExecutionSimulatorV2:
                 select(SignalHistory).where(
                     SignalHistory.timestamp >= cutoff,
                     SignalHistory.signal_type == signal_type,
+                    SignalHistory.signal_id.is_not(None),
                 )
             )
         )
@@ -188,7 +189,9 @@ class ExecutionSimulatorV2:
             after = getattr(row, field_name)
             if row.probability_at_signal is None or after is None:
                 continue
-            returns.append(float(after) - float(row.probability_at_signal))
+            raw = float(after) - float(row.probability_at_signal)
+            direction = str(row.signal_direction or "YES").upper()
+            returns.append(-raw if direction == "NO" else raw)
         return returns
 
     def simulate(

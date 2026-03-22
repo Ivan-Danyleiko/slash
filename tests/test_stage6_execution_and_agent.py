@@ -65,10 +65,22 @@ def test_execution_simulator_v2_uses_empirical_ev_formula() -> None:
     db.commit()
     db.refresh(market)
 
+    signal = Signal(
+        signal_type=SignalType.ARBITRAGE_CANDIDATE,
+        market_id=market.id,
+        title="Test arb signal",
+        summary="Test summary",
+        confidence_score=0.7,
+        signal_direction="YES",
+    )
+    db.add(signal)
+    db.commit()
+    db.refresh(signal)
+
     now = datetime.utcnow()
     rows = [
         SignalHistory(
-            signal_id=None,
+            signal_id=signal.id,
             signal_type=SignalType.ARBITRAGE_CANDIDATE,
             timestamp=now - timedelta(hours=8),
             platform="POLYMARKET",
@@ -78,9 +90,10 @@ def test_execution_simulator_v2_uses_empirical_ev_formula() -> None:
             probability_after_6h=0.50,
             liquidity=0.7,
             volume_24h=20000.0,
+            signal_direction="YES",
         ),
         SignalHistory(
-            signal_id=None,
+            signal_id=signal.id,
             signal_type=SignalType.ARBITRAGE_CANDIDATE,
             timestamp=now - timedelta(hours=7),
             platform="POLYMARKET",
@@ -90,9 +103,10 @@ def test_execution_simulator_v2_uses_empirical_ev_formula() -> None:
             probability_after_6h=0.43,
             liquidity=0.7,
             volume_24h=20000.0,
+            signal_direction="YES",
         ),
         SignalHistory(
-            signal_id=None,
+            signal_id=signal.id,
             signal_type=SignalType.ARBITRAGE_CANDIDATE,
             timestamp=now - timedelta(hours=6),
             platform="POLYMARKET",
@@ -102,6 +116,7 @@ def test_execution_simulator_v2_uses_empirical_ev_formula() -> None:
             probability_after_6h=0.47,
             liquidity=0.7,
             volume_24h=20000.0,
+            signal_direction="YES",
         ),
     ]
     db.add_all(rows)

@@ -681,12 +681,19 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
             reasons.append(f"signal {signal.id}: duplicate open market")
             continue
 
-        # Soft Stage8 gate: if a Stage8 decision exists and is not EXECUTE_ALLOWED, skip.
+        # Soft Stage8 gate: block real risk reasons; allow data-pending with reduced sizing.
         s8_row = _s8_by_signal.get(int(signal.id))
-        if s8_row is not None and str(s8_row.execution_action or "").upper() != "EXECUTE_ALLOWED":
-            skipped += 1
-            reasons.append(f"signal {signal.id}: stage8 blocked ({s8_row.execution_action})")
-            continue
+        s8_shadow_sizing = False
+        if s8_row is not None and str(s8_row.execution_action or "").upper() not in ("EXECUTE_ALLOWED", "SHADOW_ONLY"):
+            reason_codes = list(s8_row.reason_codes or [])
+            data_only_block = bool(reason_codes) and all(
+                r == "data_insufficient_for_acceptance" for r in reason_codes if r
+            )
+            if not data_only_block:
+                skipped += 1
+                reasons.append(f"signal {signal.id}: stage8 blocked ({s8_row.execution_action})")
+                continue
+            s8_shadow_sizing = True
 
         direction = str(cand.get("direction") or _resolve_trade_direction(signal)).upper()
         if direction not in ("YES", "NO"):
@@ -721,6 +728,8 @@ def run_simulation_cycle(db: Session) -> dict[str, Any]:
         )
         position_cap = CLOB_MAX_POSITION_PCT if is_clob else NON_CLOB_MAX_POSITION_PCT
         position_pct = min(adjusted_kelly, position_cap)
+        if s8_shadow_sizing:
+            position_pct *= 0.5
         if position_pct <= 0.0:
             skipped += 1
             reasons.append(f"signal {signal.id}: zero kelly after portfolio adjustment")

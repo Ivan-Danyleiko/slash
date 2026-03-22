@@ -212,7 +212,12 @@ def _run_job(
     run_fn,
     details_fn=None,
     response_fn=None,
+    stale_minutes: int | None = None,
 ) -> dict:
+    if stale_minutes is not None:
+        _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=stale_minutes)
+        if _is_recent_running_job(db, job_name=job_name, stale_minutes=stale_minutes):
+            return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
     job = _start_job(db, job_name)
     try:
         payload = run_fn()
@@ -593,6 +598,7 @@ def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200
     return _run_job(
         db,
         job_name="stage7_evaluate",
+        stale_minutes=25,
         run_fn=lambda: build_stage7_shadow_report(
             db,
             settings=settings,

@@ -204,7 +204,7 @@ class Settings(BaseSettings):
     snapshot_fresh_hours: int = Field(default=6, alias="SNAPSHOT_FRESH_HOURS")
     top_window_size: int = Field(default=20, alias="TOP_WINDOW_SIZE")
     signal_top_min_score_total: float = Field(default=0.45, alias="SIGNAL_TOP_MIN_SCORE_TOTAL")
-    signal_top_min_utility_score: float = Field(default=0.08, alias="SIGNAL_TOP_MIN_UTILITY_SCORE")
+    signal_top_min_utility_score: float = Field(default=0.005, alias="SIGNAL_TOP_MIN_UTILITY_SCORE")
     signal_top_max_missing_rules_share: float = Field(default=0.35, alias="SIGNAL_TOP_MAX_MISSING_RULES_SHARE")
     signal_top_min_confidence_missing_rules: float = Field(
         default=0.35, alias="SIGNAL_TOP_MIN_CONFIDENCE_MISSING_RULES"

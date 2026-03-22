@@ -89,7 +89,9 @@ def _data_sufficiency_snapshot(db: Session) -> dict[str, Any]:
         min_samples_per_window=10,
         bootstrap_sims=500,
     )
-    walkforward_windows_total = int(len(walkforward.get("windows") or []))
+    walkforward_windows_total = sum(
+        int(r.get("windows_count") or 0) for r in (walkforward.get("rows") or [])
+    )
     sufficient = (
         resolved_rows_total >= 30
         and keeps_with_resolution >= 10
