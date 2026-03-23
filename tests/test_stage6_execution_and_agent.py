@@ -41,6 +41,15 @@ def _settings(**overrides):
         "signal_execution_polymarket_negrisk_impact_multiplier": 1.0,
         "signal_execution_kalshi_taker_coeff": 0.07,
         "signal_execution_kalshi_maker_fee_pct": 0.003,
+        # Stage19 params
+        "stage19_calibration_enabled": False,
+        "stage19_calibration_min_samples": 50,
+        "stage19_calibration_embargo_days": 7,
+        "stage19_calibration_method": "sigmoid",
+        "stage19_kelly_alpha": 0.5,
+        "stage19_portfolio_cap_usd": 500.0,
+        "stage19_per_market_cap_pct": 0.10,
+        "stage19_size_consistency_enabled": False,
     }
     base.update(overrides)
     return SimpleNamespace(**base)

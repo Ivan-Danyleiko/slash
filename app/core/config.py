@@ -432,6 +432,37 @@ class Settings(BaseSettings):
     stage18_structural_arb_max_group_size: int = Field(default=8, alias="STAGE18_STRUCTURAL_ARB_MAX_GROUP_SIZE")
     stage18_require_kalshi: bool = Field(default=False, alias="STAGE18_REQUIRE_KALSHI")
 
+    # ── Stage19: Signal Quality & Edge Realization ─────────────────────────────
+    # Calibration Engine v1
+    stage19_calibration_enabled: bool = Field(default=True, alias="STAGE19_CALIBRATION_ENABLED")
+    stage19_calibration_min_samples: int = Field(default=50, alias="STAGE19_CALIBRATION_MIN_SAMPLES")
+    stage19_calibration_embargo_days: int = Field(default=7, alias="STAGE19_CALIBRATION_EMBARGO_DAYS")
+    stage19_calibration_method: str = Field(default="sigmoid", alias="STAGE19_CALIBRATION_METHOD")  # sigmoid | isotonic
+
+    # Utility/size consistency + Half-Kelly
+    stage19_kelly_alpha: float = Field(default=0.5, alias="STAGE19_KELLY_ALPHA")  # Half-Kelly
+    stage19_portfolio_cap_usd: float = Field(default=500.0, alias="STAGE19_PORTFOLIO_CAP_USD")
+    stage19_per_market_cap_pct: float = Field(default=0.10, alias="STAGE19_PER_MARKET_CAP_PCT")
+    stage19_size_consistency_enabled: bool = Field(default=True, alias="STAGE19_SIZE_CONSISTENCY_ENABLED")
+
+    # Lag-arb detector (cross-platform)
+    stage19_lag_arb_enabled: bool = Field(default=True, alias="STAGE19_LAG_ARB_ENABLED")
+    stage19_lag_arb_min_lag_minutes: int = Field(default=30, alias="STAGE19_LAG_ARB_MIN_LAG_MINUTES")
+    stage19_lag_arb_min_move: float = Field(default=0.04, alias="STAGE19_LAG_ARB_MIN_MOVE")
+    stage19_lag_arb_min_liquidity: float = Field(default=0.30, alias="STAGE19_LAG_ARB_MIN_LIQUIDITY")
+
+    # Structural arb v2
+    stage19_structural_arb_min_basket_ev: float = Field(default=0.005, alias="STAGE19_STRUCTURAL_ARB_MIN_BASKET_EV")
+
+    # Drift monitoring
+    stage19_drift_utility_threshold: float = Field(default=0.20, alias="STAGE19_DRIFT_UTILITY_THRESHOLD")
+    stage19_drift_ece_threshold: float = Field(default=0.05, alias="STAGE19_DRIFT_ECE_THRESHOLD")
+    stage19_drift_spread_threshold: float = Field(default=0.50, alias="STAGE19_DRIFT_SPREAD_THRESHOLD")
+
+    # Daily report PASS/FAIL thresholds
+    stage19_gate_ece_improvement_pct: float = Field(default=0.20, alias="STAGE19_GATE_ECE_IMPROVEMENT_PCT")
+    stage19_gate_slippage_error_max: float = Field(default=0.20, alias="STAGE19_GATE_SLIPPAGE_ERROR_MAX")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

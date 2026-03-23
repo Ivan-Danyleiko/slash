@@ -194,6 +194,38 @@ class ExecutionSimulatorV2:
             returns.append(-raw if direction == "NO" else raw)
         return returns
 
+    @staticmethod
+    def _kelly_size(
+        *,
+        expected_edge: float,
+        market_prob: float,
+        kelly_alpha: float,
+        base_size_usd: float,
+        portfolio_cap_usd: float,
+        per_market_cap_pct: float,
+        liquidity_value: float,
+    ) -> float:
+        """Compute effective position size via Half-Kelly with caps.
+
+        Kelly fraction f* = edge / (b*q - a*p)  simplified to edge / prob_complement.
+        size_effective = base_size * kelly_fraction * kelly_alpha, capped at:
+          - per_market_cap: per_market_cap_pct * portfolio_cap_usd
+          - liquidity_cap: 10% of market liquidity
+        """
+        market_prob = max(0.01, min(0.99, float(market_prob)))
+        q = 1.0 - market_prob  # prob of not resolving YES
+        # Full-Kelly fraction relative to base_size
+        if q > 0 and expected_edge > 0:
+            kelly_f = expected_edge / q
+        else:
+            kelly_f = 0.0
+        kelly_f = max(0.0, min(1.0, kelly_f))
+        size = base_size_usd * kelly_f * kelly_alpha
+        per_market_cap = per_market_cap_pct * portfolio_cap_usd
+        liquidity_cap = max(10.0, float(liquidity_value) * 0.10)
+        size = min(size, per_market_cap, liquidity_cap)
+        return max(1.0, round(size, 2))
+
     def simulate(
         self,
         *,
@@ -228,6 +260,25 @@ class ExecutionSimulatorV2:
         prior_edge = self._prior_edge(market=market, days_to_resolution=days_to_resolution)
         expected_edge = (w_empirical * expected_edge_empirical) + ((1.0 - w_empirical) * prior_edge)
 
+        # Stage19 19A: apply post-hoc calibration to market probability before cost calc.
+        raw_prob = float(market.probability_yes or 0.5)
+        calibrated_prob_yes = raw_prob
+        calibration_version = "passthrough_v1"
+        calibration_confidence = 0.0
+        if bool(self.settings.stage19_calibration_enabled):
+            try:
+                from app.services.signals.calibration import get_calibrator
+                cal = get_calibrator(
+                    self.db,
+                    settings=self.settings,
+                    signal_type_filter=signal_type.value if signal_type else None,
+                )
+                calibrated_prob_yes = cal.calibrate(raw_prob)
+                calibration_version = cal.calibration_version
+                calibration_confidence = cal.calibration_confidence
+            except Exception:  # noqa: BLE001
+                pass  # calibration failure is non-fatal — fall through to raw_prob
+
         platform_name = self._platform_name(market.platform_id)
         costs_pct, slippage_factor = self._costs_pct(
             market=market,
@@ -242,7 +293,41 @@ class ExecutionSimulatorV2:
             min(float(market.liquidity_value or 0.0) * 0.1, float(market.volume_24h or 0.0) * 0.05),
         )
         time_penalty = max(0.60, 1.0 - min(0.40, (days_to_resolution / 365.0) * 0.20))
-        utility_score = slippage_adjusted_edge * (0.4 + 0.6 * float(liquidity_score or 0.0)) * time_penalty
+        liq = float(liquidity_score or 0.0)
+        utility_score = slippage_adjusted_edge * (0.4 + 0.6 * liq) * time_penalty
+
+        # Stage19 19B: compute effective position size (size-consistent utility).
+        base_size_usd = max(1.0, float(self.settings.signal_execution_position_size_usd))
+        kelly_alpha = max(0.1, min(1.0, float(getattr(self.settings, "stage19_kelly_alpha", 0.5))))
+        portfolio_cap = max(100.0, float(getattr(self.settings, "stage19_portfolio_cap_usd", 500.0)))
+        per_market_cap_pct = max(0.01, min(0.5, float(getattr(self.settings, "stage19_per_market_cap_pct", 0.10))))
+        size_consistency_enabled = bool(getattr(self.settings, "stage19_size_consistency_enabled", True))
+
+        if size_consistency_enabled and slippage_adjusted_edge > 0:
+            size_effective_usd = self._kelly_size(
+                expected_edge=slippage_adjusted_edge,
+                market_prob=calibrated_prob_yes,
+                kelly_alpha=kelly_alpha,
+                base_size_usd=base_size_usd,
+                portfolio_cap_usd=portfolio_cap,
+                per_market_cap_pct=per_market_cap_pct,
+                liquidity_value=float(market.liquidity_value or 0.0),
+            )
+            # Recompute costs_pct on effective size (gas fee dominates at small sizes).
+            if platform_name == "POLYMARKET":
+                gas_usd = float(self.settings.signal_execution_polymarket_gas_fee_usd)
+                bridge_usd = float(self.settings.signal_execution_polymarket_bridge_fee_usd)
+                costs_pct_effective = costs_pct - (gas_usd / base_size_usd) + (gas_usd / size_effective_usd) \
+                    - (bridge_usd / base_size_usd) + (bridge_usd / size_effective_usd)
+                costs_pct_effective = max(0.0, round(costs_pct_effective, 6))
+            else:
+                costs_pct_effective = costs_pct
+            ev_effective = max(0.0, expected_edge - costs_pct_effective)
+            utility_score_effective = ev_effective * (0.4 + 0.6 * liq) * time_penalty
+        else:
+            size_effective_usd = base_size_usd
+            costs_pct_effective = costs_pct
+            utility_score_effective = utility_score
 
         return {
             "assumptions_version": (
@@ -267,6 +352,14 @@ class ExecutionSimulatorV2:
             "days_to_resolution": round(days_to_resolution, 2),
             "time_penalty": round(time_penalty, 4),
             "utility_score": round(utility_score, 6),
+            # Stage19 additions
+            "utility_score_effective": round(utility_score_effective, 6),
+            "size_input_usd": round(base_size_usd, 2),
+            "size_effective_usd": round(size_effective_usd, 2),
+            "costs_pct_effective": round(costs_pct_effective, 6),
+            "calibrated_prob_yes": round(calibrated_prob_yes, 6),
+            "calibration_version": calibration_version,
+            "calibration_confidence": round(calibration_confidence, 4),
             "execution_platform": platform_name.lower() if platform_name else "unknown",
             "is_neg_risk": bool(market.is_neg_risk),
         }

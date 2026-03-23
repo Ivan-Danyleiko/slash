@@ -24,6 +24,8 @@ from app.tasks.jobs import (
     stage17_track_job,
     stage18_canonicalize_job,
     stage18_track_job,
+    stage19_baseline_job,
+    stage19_report_job,
     stage7_evaluate_job,
     stage8_final_report_job,
     stage8_shadow_ledger_job,
@@ -100,6 +102,8 @@ _TASK_JOB_MAP = {
     "stage18_track": stage18_track_job,
     "pipeline_health": pipeline_health_job,
     "cleanup_stale_job_runs": cleanup_stale_job_runs_job,
+    "stage19_report": stage19_report_job,
+    "stage19_baseline": stage19_baseline_job,
 }
 
 for _task_name, _job_fn in _TASK_JOB_MAP.items():
@@ -227,5 +231,14 @@ celery_app.conf.beat_schedule = {
     "cleanup-stale-job-runs-nightly": {
         "task": "cleanup_stale_job_runs",
         "schedule": crontab(hour=4, minute=0),
+    },
+    # Stage19 quality reporting
+    "stage19-report-every-6h": {
+        "task": "stage19_report",
+        "schedule": crontab(hour="*/6", minute=0),
+    },
+    "stage19-baseline-daily": {
+        "task": "stage19_baseline",
+        "schedule": crontab(hour=6, minute=55),
     },
 }

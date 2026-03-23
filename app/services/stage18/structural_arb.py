@@ -38,6 +38,9 @@ class StructuralArbGroup:
     platform_names: list[str]
     legs: list[dict]
     mutual_exclusivity_valid: bool = True
+    # Stage19 v2 additions
+    basket_ev_after_costs: float = 0.0
+    rejection_reason: str | None = None  # None = valid arb signal
 
 
 # ── mutual-exclusivity heuristic ─────────────────────────────────────────────
@@ -80,6 +83,21 @@ def validate_mutual_exclusivity(markets: list, threshold: float = 0.70) -> bool:
     return True
 
 
+def _estimate_basket_costs(legs: list[dict], position_size_usd: float = 100.0) -> float:
+    """Rough cost estimate for trading all legs of a basket.
+
+    Each leg: spread/2 + gas/position_size. Assumes Polymarket by default.
+    Returns total cost as fraction of basket notional.
+    """
+    total_cost = 0.0
+    for leg in legs:
+        spread = 0.01  # 1% default if no bid/ask
+        gas_pct = 0.50 / max(1.0, position_size_usd)  # $0.50 gas / position
+        neg_risk_factor = 0.4 if bool(leg.get("is_neg_risk")) else 1.0
+        total_cost += (spread + gas_pct) * neg_risk_factor
+    return round(total_cost / max(1, len(legs)), 6)
+
+
 def detect_structural_arb(
     db: "Session",
     *,
@@ -88,6 +106,7 @@ def detect_structural_arb(
     min_leg_liquidity: float = 0.10,
     min_group_size: int = 2,
     max_days_to_resolution: int | None = None,
+    min_basket_ev_after_costs: float = 0.0,
 ) -> list[StructuralArbGroup]:
     """
     Find event_group_id groups where sum(probability_yes) < 1 - min_underround.
@@ -183,6 +202,17 @@ def detect_structural_arb(
 
         me_valid = validate_mutual_exclusivity(group_markets)
 
+        # Stage19 v2: compute basket EV after costs, tag rejection reasons.
+        avg_cost = _estimate_basket_costs(legs)
+        basket_ev = underround - avg_cost
+        rejection: str | None = None
+        if not me_valid:
+            rejection = "invalid_mutual_exclusivity"
+        elif min_liq < min_leg_liquidity:
+            rejection = "insufficient_liquidity"
+        elif basket_ev <= min_basket_ev_after_costs:
+            rejection = "negative_post_cost_ev"
+
         results.append(
             StructuralArbGroup(
                 event_group_id=gid,
@@ -196,6 +226,8 @@ def detect_structural_arb(
                 platform_names=plat_names,
                 legs=legs,
                 mutual_exclusivity_valid=me_valid,
+                basket_ev_after_costs=round(basket_ev, 6),
+                rejection_reason=rejection,
             )
         )
 

@@ -886,6 +886,131 @@ class SignalEngine:
             "structural_arb_invalid_me_skipped": skipped_invalid_me,
         }
 
+    def generate_lag_arb_signals(self) -> dict[str, int]:
+        """Stage19 Workstream D: detect cross-platform probability lag, shadow only.
+
+        Generates LAG_ARB_CANDIDATE when the same event_group_id has:
+        - Two markets on different platforms
+        - Probability difference > min_move (after spread+slippage buffer)
+        - The lagging platform's last update is older by > min_lag_minutes
+        - Both legs pass the liquidity gate
+        """
+        settings = self.settings
+        if not bool(getattr(settings, "stage19_lag_arb_enabled", True)):
+            return {"lag_arb_signals_created": 0, "lag_arb_enabled": False}
+
+        min_lag_min = max(1, int(getattr(settings, "stage19_lag_arb_min_lag_minutes", 30)))
+        min_move = max(0.01, float(getattr(settings, "stage19_lag_arb_min_move", 0.04)))
+        min_liq = max(0.0, float(getattr(settings, "stage19_lag_arb_min_liquidity", 0.30)))
+        spread_buffer = 0.015  # conservative cost buffer to avoid false positives
+        now = datetime.now(UTC)
+        lag_cutoff = now - timedelta(minutes=min_lag_min)
+
+        # Load active markets with event_group_id grouped by group
+        from sqlalchemy import or_
+        markets = list(
+            self.db.scalars(
+                select(Market).where(
+                    Market.event_group_id.is_not(None),
+                    Market.probability_yes.is_not(None),
+                    or_(
+                        Market.status.is_(None),
+                        ~Market.status.in_(["resolved", "closed", "cancelled"]),
+                    ),
+                )
+            )
+        )
+        if not markets:
+            return {"lag_arb_signals_created": 0}
+
+        # Load liquidity scores
+        market_ids = [m.id for m in markets]
+        liq_by_id = {
+            r.market_id: float(r.score or 0.0)
+            for r in self.db.scalars(
+                select(LiquidityAnalysis).where(LiquidityAnalysis.market_id.in_(market_ids))
+            )
+        }
+
+        # Group by event_group_id — only cross-platform pairs are relevant
+        groups: dict[str, list] = {}
+        for m in markets:
+            groups.setdefault(str(m.event_group_id), []).append(m)
+
+        created = 0
+        skipped_insufficient_liq = 0
+        skipped_no_lag = 0
+        skipped_small_move = 0
+
+        for gid, group_mkts in groups.items():
+            # Only cross-platform pairs
+            platforms = {int(m.platform_id) for m in group_mkts}
+            if len(platforms) < 2 or len(group_mkts) < 2:
+                continue
+
+            # Sort by updated_at descending — most recent is "leading"
+            def _updated(m) -> datetime:
+                ts = getattr(m, "updated_at", None) or getattr(m, "created_at", None) or now
+                return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+            sorted_mkts = sorted(group_mkts, key=_updated, reverse=True)
+            leader = sorted_mkts[0]
+            for laggard in sorted_mkts[1:]:
+                if int(leader.platform_id) == int(laggard.platform_id):
+                    continue
+                lag_ts = _updated(laggard)
+                if lag_ts >= lag_cutoff:
+                    skipped_no_lag += 1
+                    continue
+                liq_a = liq_by_id.get(leader.id, 0.0)
+                liq_b = liq_by_id.get(laggard.id, 0.0)
+                if liq_a < min_liq or liq_b < min_liq:
+                    skipped_insufficient_liq += 1
+                    continue
+                prob_lead = float(leader.probability_yes or 0.5)
+                prob_lag = float(laggard.probability_yes or 0.5)
+                move = abs(prob_lead - prob_lag)
+                if move < (min_move + spread_buffer):
+                    skipped_small_move += 1
+                    continue
+                lag_minutes = (now - lag_ts).total_seconds() / 60.0
+                direction = "YES" if prob_lead > prob_lag else "NO"
+                outcome = self._create_signal_if_not_recent(
+                    signal_type=SignalType.LAG_ARB_CANDIDATE,
+                    market_id=laggard.id,
+                    related_market_id=leader.id,
+                    title=f"Lag arb: {str(laggard.title or '')[:60]}",
+                    summary=(
+                        f"lead_prob={prob_lead:.3f} lag_prob={prob_lag:.3f} "
+                        f"move={move:.3f} lag={lag_minutes:.0f}min"
+                    ),
+                    confidence_score=min(1.0, move * 5.0),
+                    liquidity_score=min(liq_a, liq_b),
+                    divergence_score=round(move, 4),
+                    signal_direction=direction,
+                    metadata_json={
+                        "event_group_id": gid,
+                        "leader_market_id": int(leader.id),
+                        "laggard_market_id": int(laggard.id),
+                        "lead_prob": round(prob_lead, 6),
+                        "lag_prob": round(prob_lag, 6),
+                        "move": round(move, 6),
+                        "lag_minutes": round(lag_minutes, 1),
+                        "direction": direction,
+                        "shadow_only": True,  # always shadow in v1
+                    },
+                )
+                if outcome in ("created", "updated"):
+                    created += 1
+        if created > 0:
+            self.db.commit()
+        return {
+            "lag_arb_signals_created": created,
+            "lag_arb_skipped_insufficient_liq": skipped_insufficient_liq,
+            "lag_arb_skipped_no_lag": skipped_no_lag,
+            "lag_arb_skipped_small_move": skipped_small_move,
+        }
+
     def run(self) -> dict[str, int]:
         # detect_duplicates() is O(N²) across all markets — runs via its own
         # scheduled task every 2 hours. run() reads the pre-computed pairs from DB.
@@ -895,6 +1020,7 @@ class SignalEngine:
         result.update(self.capture_divergence_research_samples())
         result.update(self.generate_signals())
         result.update(self.generate_structural_arb_signals())
+        result.update(self.generate_lag_arb_signals())
         return result
 
     def capture_divergence_research_samples(self) -> dict[str, int]:

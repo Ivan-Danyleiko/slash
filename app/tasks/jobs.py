@@ -1653,3 +1653,22 @@ def cleanup_stale_job_runs_job(db: Session) -> dict:
         cleaned = _cleanup_all_stale_running_jobs(db, global_stale_minutes=120)
         return {"cleaned": cleaned}
     return _run_job(db, job_name="cleanup_stale_job_runs", run_fn=_run)
+
+
+def stage19_report_job(db: Session) -> dict:
+    """Stage19 daily quality report: PASS/FAIL verdict + drift metrics."""
+    def _run() -> dict:
+        from app.services.research.stage19_report import build_stage19_report
+        settings = get_settings()
+        report = build_stage19_report(db, settings=settings)
+        return report
+    return _run_job(db, job_name="stage19_report", run_fn=_run)
+
+
+def stage19_baseline_job(db: Session) -> dict:
+    """Stage19 one-time baseline snapshot (idempotent: skips if already taken today)."""
+    def _run() -> dict:
+        from app.services.research.stage19_report import build_stage19_baseline
+        settings = get_settings()
+        return build_stage19_baseline(db, settings=settings)
+    return _run_job(db, job_name="stage19_baseline", run_fn=_run)
