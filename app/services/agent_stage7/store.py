@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.models import Stage7AgentDecision
@@ -48,22 +49,28 @@ def save_stage7_decision(
         or payload.get("tool_snapshot_version")
         or "v1"
     )
-    row = Stage7AgentDecision(
-        signal_id=int(payload.get("signal_id") or 0),
-        input_hash=str(payload.get("input_hash") or ""),
-        base_decision=str(payload.get("base_decision") or "SKIP"),
-        decision=str(payload.get("decision") or "SKIP"),
-        confidence_adjustment=float(payload.get("confidence_adjustment") or 0.0),
-        reason_codes=list(payload.get("reason_codes") or []),
-        evidence_bundle=dict(payload.get("evidence_bundle") or {}),
-        model_id=str(payload.get("model_id") or ""),
-        model_version=str(payload.get("model_version") or ""),
-        prompt_template_version=str(payload.get("prompt_template_version") or ""),
-        provider=str(payload.get("provider") or ""),
-        provider_fingerprint=str(payload.get("provider_fingerprint") or ""),
-        tool_snapshot_version=resolved_tool_snapshot,
-        llm_cost_usd=float(llm_cost_usd or 0.0),
+    # Use INSERT ... ON CONFLICT DO NOTHING to prevent UniqueViolation when
+    # parallel workers evaluate the same input_hash simultaneously.
+    stmt = (
+        pg_insert(Stage7AgentDecision)
+        .values(
+            signal_id=int(payload.get("signal_id") or 0),
+            input_hash=str(payload.get("input_hash") or ""),
+            base_decision=str(payload.get("base_decision") or "SKIP"),
+            decision=str(payload.get("decision") or "SKIP"),
+            confidence_adjustment=float(payload.get("confidence_adjustment") or 0.0),
+            reason_codes=list(payload.get("reason_codes") or []),
+            evidence_bundle=dict(payload.get("evidence_bundle") or {}),
+            model_id=str(payload.get("model_id") or ""),
+            model_version=str(payload.get("model_version") or ""),
+            prompt_template_version=str(payload.get("prompt_template_version") or ""),
+            provider=str(payload.get("provider") or ""),
+            provider_fingerprint=str(payload.get("provider_fingerprint") or ""),
+            tool_snapshot_version=resolved_tool_snapshot,
+            llm_cost_usd=float(llm_cost_usd or 0.0),
+        )
+        .on_conflict_do_nothing(constraint="uq_stage7_agent_decisions_input_hash")
     )
-    db.add(row)
+    db.execute(stmt)
     db.flush()
     return {**payload, "llm_cost_usd": float(llm_cost_usd or 0.0), "cache_hit": False}

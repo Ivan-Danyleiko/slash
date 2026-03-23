@@ -205,8 +205,14 @@ def run_stage17_tail_cycle(
     opened = 0
     closed = 0
     skipped = 0
+    skip_reasons: dict[str, int] = {}
     opened_alerts: list[dict[str, Any]] = []
     win_alerts: list[dict[str, Any]] = []
+
+    def _skip(reason: str) -> None:
+        nonlocal skipped
+        skipped += 1
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
     if not _acquire_tail_cycle_lock_if_supported(db):
         return {
             "enabled": True,
@@ -274,14 +280,14 @@ def run_stage17_tail_cycle(
             break
         # Skip if signal already has ANY position (open or closed) — prevents cyclic reopen.
         if int(signal.id) in existing_signal_ids:
-            skipped += 1
+            _skip("already_has_position")
             continue
         if int(signal.market_id or 0) in open_market_ids:
-            skipped += 1
+            _skip("market_already_open")
             continue
         market = candidate_markets.get(int(signal.market_id or 0))
         if market is None or _is_market_resolved(market, now=now_utc):
-            skipped += 1
+            _skip("market_resolved_or_missing")
             continue
         metadata = signal.metadata_json if isinstance(signal.metadata_json, dict) else {}
         tail_category = str(metadata.get("tail_category") or "unknown")
@@ -303,7 +309,7 @@ def run_stage17_tail_cycle(
                 our_prob=float(metadata.get("tail_our_prob") or market.probability_yes or 0.5),
             )
             if str(llm.get("decision") or "KEEP").upper() == "SKIP":
-                skipped += 1
+                _skip("llm_skip")
                 continue
             # v2: direction is always YES (bet_yes_underpriced). LLM can only SKIP, not flip direction.
             model_version = f"{llm.get('provider') or 'none'}:{llm.get('model_version') or 'none'}"
@@ -322,12 +328,12 @@ def run_stage17_tail_cycle(
             market_prob=market_prob,
         )
         if (open_notional_total + float(notional_usd)) > budget_total:
-            skipped += 1
+            _skip("budget_exhausted")
             continue
         cap_pct = float(category_limits.get(str(tail_category), 0.01))
         used_cat = float(category_used_map.get(str(tail_category), 0.0))
         if ((used_cat + float(notional_usd)) / max(1e-9, ref_balance)) > cap_pct:
-            skipped += 1
+            _skip(f"category_cap_{tail_category}")
             continue
         entry_price = _side_price(market, direction)
         resolution_deadline = market.resolution_time
@@ -335,7 +341,7 @@ def run_stage17_tail_cycle(
             ref_deadline = resolution_deadline if resolution_deadline.tzinfo else resolution_deadline.replace(tzinfo=UTC)
             max_days = max(1, int(settings.signal_tail_max_days_to_resolution))
             if (ref_deadline - now_utc).total_seconds() / 86400.0 > max_days:
-                skipped += 1
+                _skip("resolution_too_far")
                 continue
         row = Stage17TailPosition(
             signal_id=signal.id,
@@ -515,6 +521,7 @@ def run_stage17_tail_cycle(
         "opened": opened,
         "closed": closed,
         "skipped": skipped,
+        "skip_reasons": skip_reasons,
         "breaker_blocked": False,
         "opened_alerts": opened_alerts,
         "win_alerts": win_alerts,

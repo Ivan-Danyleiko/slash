@@ -7,10 +7,12 @@ from app.tasks.jobs import (
     analyze_rules_job,
     cleanup_old_signals_job,
     cleanup_signal_history_job,
+    cleanup_stale_job_runs_job,
     daily_digest_job,
     detect_divergence_job,
     detect_duplicates_job,
     generate_signals_job,
+    pipeline_health_job,
     quality_snapshot_job,
     stage9_track_job,
     stage10_track_job,
@@ -96,6 +98,8 @@ _TASK_JOB_MAP = {
     "stage17_batch": stage17_batch_job,
     "stage18_canonicalize": stage18_canonicalize_job,
     "stage18_track": stage18_track_job,
+    "pipeline_health": pipeline_health_job,
+    "cleanup_stale_job_runs": cleanup_stale_job_runs_job,
 }
 
 for _task_name, _job_fn in _TASK_JOB_MAP.items():
@@ -214,5 +218,14 @@ celery_app.conf.beat_schedule = {
     "stage18-track-daily": {
         "task": "stage18_track",
         "schedule": crontab(hour=3, minute=50),
+    },
+    # Observability & maintenance
+    "pipeline-health-every-6h": {
+        "task": "pipeline_health",
+        "schedule": crontab(hour="*/6", minute=55),
+    },
+    "cleanup-stale-job-runs-nightly": {
+        "task": "cleanup_stale_job_runs",
+        "schedule": crontab(hour=4, minute=0),
     },
 }

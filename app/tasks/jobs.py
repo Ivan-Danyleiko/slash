@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from bisect import bisect_left
 
 import httpx
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -129,6 +129,40 @@ def _cleanup_stale_running_jobs(
     return len(stale_rows)
 
 
+def _cleanup_all_stale_running_jobs(db: Session, *, global_stale_minutes: int = 120) -> int:
+    """Sweep ALL job_runs — catches orphaned RUNNING rows no per-job guard would see."""
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(minutes=max(30, global_stale_minutes))
+    stale_rows = list(
+        db.scalars(
+            select(JobRun).where(
+                JobRun.status == "RUNNING",
+                JobRun.started_at < stale_before,
+            )
+        )
+    )
+    for stale in stale_rows:
+        stale.status = "FAILED"
+        stale.finished_at = now
+        stale.details = {
+            "error": "global_stale_timeout",
+            "note": f"auto-closed by global sweep after {global_stale_minutes}min",
+            "job_name": stale.job_name,
+        }
+    if stale_rows:
+        db.commit()
+    return len(stale_rows)
+
+
+def _try_advisory_lock(db: Session, lock_key: int) -> bool:
+    """Attempt PostgreSQL advisory transaction lock. Returns False if already locked."""
+    try:
+        result = db.execute(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": lock_key})
+        return bool(result.scalar())
+    except Exception:  # noqa: BLE001
+        return True  # non-PG backend — allow through
+
+
 def _is_recent_running_job(db: Session, *, job_name: str, stale_minutes: int) -> bool:
     stale_before = datetime.now(UTC) - timedelta(minutes=max(1, int(stale_minutes)))
     running_exists = db.scalar(
@@ -170,10 +204,13 @@ def _run_job_with_guard(
     job_name: str,
     stale_minutes: int,
     run_fn,
+    advisory_lock_key: int | None = None,
 ) -> dict:
     _cleanup_stale_running_jobs(db, job_name=job_name, stale_minutes=stale_minutes)
     if _is_recent_running_job(db, job_name=job_name, stale_minutes=stale_minutes):
         return {"status": "ok", "result": {"skipped": True, "reason": "already_running"}}
+    if advisory_lock_key is not None and not _try_advisory_lock(db, advisory_lock_key):
+        return {"status": "ok", "result": {"skipped": True, "reason": "advisory_lock_held"}}
     job = _start_job(db, job_name)
     try:
         result = run_fn()
@@ -237,7 +274,8 @@ def sync_all_platforms_job(db: Session, platform: str | None = None) -> dict:
     return _run_job_with_guard(
         db,
         job_name="sync_all_platforms",
-        stale_minutes=40,
+        stale_minutes=28,  # < 30min schedule → prevents overlap on slow cycles
+        advisory_lock_key=700001,
         run_fn=lambda: CollectorSyncService(db).sync_all(platform=platform),
     )
 
@@ -322,6 +360,11 @@ def daily_digest_job(db: Session) -> dict:
                 if ok:
                     svc.mark_digest_sent(user)
                     sent += 1
+                else:
+                    # Track delivery failure per user for pipeline_health monitoring.
+                    db.add(UserEvent(user_id=user.id, event_type="digest_failed", payload_json={"reason": "tg_send_failed"}))
+                    db.commit()
+                    skipped += 1
             else:
                 # no token configured — mark as sent anyway (local/dev mode)
                 svc.mark_digest_sent(user)
@@ -368,6 +411,9 @@ def signal_push_job(db: Session) -> dict:
         def _skip(reason: str) -> None:
             skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
 
+        # Bucket for low-utility signals — sent as digest to admin channel, not per-user push.
+        low_utility_bucket: list[str] = []
+
         # Pre-load signal pool + market map once — avoids N+1 in user loops.
         signal_pool, markets_by_id = svc.load_signal_pool_with_markets()
         for user in users:
@@ -406,6 +452,11 @@ def signal_push_job(db: Session) -> dict:
                     continue
                 if utility <= min_utility:
                     _skip("utility_too_low")
+                    # Collect as info-signal if has any positive utility (admin digest only)
+                    if utility > 0.0 and not low_utility_bucket:
+                        title_esc = _escape_markdown_v2(str(signal.title or "")[:64])
+                        util_str = _escape_markdown_v2(f"{utility:.4f}")
+                        low_utility_bucket.append(f"• {title_esc} \\(util={util_str}\\)")
                     continue
                 if signal.signal_type == SignalType.ARBITRAGE_CANDIDATE:
                     metric_label = "Рух ціни"
@@ -441,7 +492,25 @@ def signal_push_job(db: Session) -> dict:
                     sent += 1
         if sent > 0:
             db.commit()
-        result = {"signals_prepared": prepared, "signals_sent": sent, "skipped_by_reason": skipped_by_reason}
+        # Send low-utility info-digest to admin channel if no regular signals were pushed.
+        info_sent = False
+        if sent == 0 and low_utility_bucket and token:
+            admin_ids = _admin_chat_ids(settings)
+            if admin_ids:
+                info_lines = [
+                    "ℹ️ *Сигнали нижче порогу utility* \\(інформаційно\\)",
+                    *low_utility_bucket[:5],
+                ]
+                info_text = "\n".join(info_lines)
+                for chat_id in admin_ids:
+                    _tg_send(token, chat_id, info_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+                info_sent = True
+        result = {
+            "signals_prepared": prepared,
+            "signals_sent": sent,
+            "skipped_by_reason": skipped_by_reason,
+            "info_digest_sent": info_sent,
+        }
         return result
 
     return _run_job_with_guard(db, job_name="signal_push", stale_minutes=25, run_fn=_run)
@@ -614,6 +683,9 @@ def provider_contract_checks_job(db: Session) -> dict:
 def stage7_evaluate_job(db: Session, *, lookback_days: int = 7, limit: int = 200) -> dict:
     """Evaluate recent signals via Stage 7 LLM agent and store decisions."""
     settings = get_settings()
+    # Advisory lock 700007 prevents parallel workers from running stage7 simultaneously.
+    if not _try_advisory_lock(db, 700007):
+        return {"status": "ok", "result": {"skipped": True, "reason": "advisory_lock_held"}}
     return _run_job(
         db,
         job_name="stage7_evaluate",
@@ -913,6 +985,11 @@ def stage17_cycle_job(
             messages.append(_build_stage17_win_message(item))
         telegram_sent = _send_stage17_telegram_messages(settings, messages)
         result["telegram_sent"] = int(telegram_sent)
+        # Expose top skip reasons in job details for diagnostics.
+        skip_reasons = result.get("skip_reasons") or {}
+        result["skip_reasons_top"] = dict(
+            sorted(skip_reasons.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        )
         return result
 
     return _run_job_with_guard(
@@ -1483,3 +1560,96 @@ def cleanup_signal_history_job(db: Session) -> dict:
         return {"deleted": int(deleted), "retention_days": settings.signal_history_retention_days}
 
     return _run_job(db, job_name="cleanup_signal_history", run_fn=_run)
+
+
+def pipeline_health_job(db: Session) -> dict:
+    """Compute pipeline effectiveness metrics for the last 24h with alert thresholds."""
+    def _run() -> dict:
+        now = datetime.now(UTC)
+        window = now - timedelta(hours=24)
+
+        # signals_sent in last 24h from UserEvent
+        signals_sent_24h = int(
+            db.scalar(
+                select(func.count()).select_from(UserEvent).where(
+                    UserEvent.event_type == "signal_sent",
+                    UserEvent.created_at >= window,
+                )
+            ) or 0
+        )
+
+        # stage17 positions opened in last 24h
+        stage17_opened_24h = int(
+            db.scalar(
+                select(func.count()).select_from(Stage17TailPosition).where(
+                    Stage17TailPosition.opened_at >= window,
+                )
+            ) or 0
+        )
+
+        # stage7 job runs in last 24h: total, failed
+        stage7_runs = list(
+            db.execute(
+                select(JobRun.status, func.count()).select_from(JobRun).where(
+                    JobRun.job_name == "stage7_evaluate",
+                    JobRun.started_at >= window,
+                ).group_by(JobRun.status)
+            )
+        )
+        stage7_total = sum(c for _, c in stage7_runs)
+        stage7_failed = sum(c for s, c in stage7_runs if s == "FAILED")
+        stage7_failed_rate = round(stage7_failed / max(1, stage7_total), 3)
+
+        # digest delivery: sent vs failed
+        digest_sent_24h = int(
+            db.scalar(
+                select(func.count()).select_from(UserEvent).where(
+                    UserEvent.event_type == "digest_sent",
+                    UserEvent.created_at >= window,
+                )
+            ) or 0
+        )
+        digest_failed_24h = int(
+            db.scalar(
+                select(func.count()).select_from(UserEvent).where(
+                    UserEvent.event_type == "digest_failed",
+                    UserEvent.created_at >= window,
+                )
+            ) or 0
+        )
+
+        # global stale RUNNING rows
+        stale_cleaned = _cleanup_all_stale_running_jobs(db, global_stale_minutes=120)
+
+        # alert thresholds
+        alerts: list[str] = []
+        if stage7_failed_rate > 0.5:
+            alerts.append(f"stage7_failed_rate={stage7_failed_rate:.0%} > 50%")
+        if stage17_opened_24h == 0 and signals_sent_24h == 0:
+            alerts.append("pipeline_silent: no signals sent and no stage17 positions opened in 24h")
+        if digest_failed_24h > digest_sent_24h:
+            alerts.append(f"digest_failures={digest_failed_24h} exceeds sent={digest_sent_24h}")
+
+        result = {
+            "window_hours": 24,
+            "signals_sent_24h": signals_sent_24h,
+            "stage17_opened_24h": stage17_opened_24h,
+            "stage7_total_runs_24h": stage7_total,
+            "stage7_failed_rate_24h": stage7_failed_rate,
+            "digest_sent_24h": digest_sent_24h,
+            "digest_failed_24h": digest_failed_24h,
+            "stale_jobs_cleaned": stale_cleaned,
+            "alerts": alerts,
+            "healthy": len(alerts) == 0,
+        }
+        return result
+
+    return _run_job(db, job_name="pipeline_health", run_fn=_run)
+
+
+def cleanup_stale_job_runs_job(db: Session) -> dict:
+    """Global sweep: close all RUNNING job_runs older than 120 min."""
+    def _run() -> dict:
+        cleaned = _cleanup_all_stale_running_jobs(db, global_stale_minutes=120)
+        return {"cleaned": cleaned}
+    return _run_job(db, job_name="cleanup_stale_job_runs", run_fn=_run)
