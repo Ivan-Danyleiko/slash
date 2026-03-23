@@ -835,19 +835,25 @@ class SignalEngine:
         if not getattr(self.settings, 'stage18_structural_arb_enabled', False):
             return {"structural_arb_signals_created": 0}
         from app.services.stage18.structural_arb import detect_structural_arb
+        min_basket_ev = float(getattr(self.settings, "stage19_structural_arb_min_basket_ev", 0.0))
         groups = detect_structural_arb(
             self.db,
             min_underround=self.settings.stage18_structural_arb_min_underround,
             max_group_size=self.settings.stage18_structural_arb_max_group_size,
+            min_basket_ev_after_costs=min_basket_ev,
         )
         created = 0
         skipped_invalid_me = 0
+        skipped_rejected = 0
         for group in groups:
             if not group.markets:
                 continue
-            # Skip baskets where titles are too similar (not mutually exclusive outcomes)
-            if not group.mutual_exclusivity_valid:
-                skipped_invalid_me += 1
+            # Skip any basket with a rejection reason (invalid ME, low liq, negative EV)
+            if group.rejection_reason is not None:
+                if group.rejection_reason == "invalid_mutual_exclusivity":
+                    skipped_invalid_me += 1
+                else:
+                    skipped_rejected += 1
                 continue
             primary_market = group.markets[0]
             outcome = self._create_signal_if_not_recent(
@@ -875,6 +881,8 @@ class SignalEngine:
                     "legs": group.legs,
                     "basket_fill_feasibility": round(group.min_liquidity, 4),
                     "mutual_exclusivity_valid": True,
+                    "basket_ev_after_costs": group.basket_ev_after_costs,
+                    "rejection_reason": group.rejection_reason,
                 },
                 signal_direction=None,
             )
@@ -884,6 +892,7 @@ class SignalEngine:
         return {
             "structural_arb_signals_created": created,
             "structural_arb_invalid_me_skipped": skipped_invalid_me,
+            "structural_arb_rejected_skipped": skipped_rejected,
         }
 
     def generate_lag_arb_signals(self) -> dict[str, int]:
